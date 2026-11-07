@@ -11,6 +11,11 @@ python main.py
 
 Choose **Free Roam** to explore or **Ring Mode** to fly through ten-sided 3D gates.
 Clear gates before the timer runs out to gain time and build a score multiplier.
+Blue gates have larger openings (105-metre radius); red gates are smaller
+(45-metre radius). They alternate along a route with gradual turns and elevation changes.
+Use **Esc → Ring path range** to set the allowed distance from the 3D route,
+from 250 to 5,000 feet. The setting saves automatically. Leaving the route shows
+a five-second return countdown; returning resets it, while staying out ends the run.
 Gates rotate around their flight axis. Their pass-through boundary rotates with them,
 and the GPU uses shared depth testing for aircraft and gates.
 

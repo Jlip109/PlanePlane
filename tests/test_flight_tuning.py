@@ -11,12 +11,14 @@ def test_slider_drag_scales_clamps_and_persists(atmosphere, fonts, tmp_path):
     press(game, pygame.K_ESCAPE)
     game.hud_transform = (1.5, 20, 10)
     game.menu.draw(pygame.Surface((1280, 720)), game.state)
-    assert len(game.menu.slider_areas) == 3
+    assert len(game.menu.slider_areas) == 4
 
     def screen(x, y):
         return round(x*1.5+20), round(y*1.5+10)
 
     for key, rect in game.menu.slider_areas:
+        if key == 'range':
+            continue
         game.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN,
                           button=1, pos=screen(rect.centerx, rect.centery)))
         game.handle_event(pygame.event.Event(pygame.MOUSEMOTION,

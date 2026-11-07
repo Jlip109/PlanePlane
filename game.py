@@ -23,6 +23,8 @@ class Game:
         self.fonts = fonts
         self.audio = audio
         self.scores = scores if scores is not None else Scores()
+        saved_range = self.scores.get('ring_range',50)
+        self.ring_range = round(min(100,max(0,saved_range))) if isinstance(saved_range,(int,float)) and not isinstance(saved_range,bool) and math.isfinite(saved_range) else 50
         saved_tuning = self.scores.get('flight_tuning',{})
         for key,value in saved_tuning.items():
             if key in atmosphere.flight_tuning and isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value):
@@ -140,6 +142,11 @@ class Game:
         self.scores.save()
 
     def set_tuning(self, key, value):
+        if key == 'range':
+            self.ring_range = round(min(100,max(0,value)))
+            self.scores.data['ring_range'] = self.ring_range
+            self.scores.save()
+            return
         if key not in self.atmosphere.flight_tuning:
             return
         self.atmosphere.flight_tuning[key] = round(min(100,max(0,value)))

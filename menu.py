@@ -177,19 +177,21 @@ class Menu:
             y += 48
         ui.label(surface,'Flight tuning',fonts.tiny,(640,145),ui.ACCENT)
         tuning = self.game.atmosphere.flight_tuning
-        for index,(key,label) in enumerate((('climb','Climb · W/S + mouse'),('acceleration','Acceleration'),('steering','Steering · A/D + mouse'))):
-            y = 193+index*105
+        for index,(key,label) in enumerate((('climb','Climb · W/S + mouse'),('acceleration','Acceleration'),('steering','Steering · A/D + mouse'),('range','Ring path range'))):
+            y = 185+index*83
+            value = self.game.ring_range if key == 'range' else tuning[key]
+            value_text = f'{250+4750*value/100:,.0f} ft' if key == 'range' else str(value)
             ui.text(surface,label,fonts.body,ui.TEXT,(640,y))
-            ui.text(surface,str(tuning[key]),fonts.mono,ui.ACCENT,(980,y),'topright')
-            rect = pygame.Rect(640,y+40,340,8)
+            ui.text(surface,value_text,fonts.mono,ui.ACCENT,(980,y),'topright')
+            rect = pygame.Rect(640,y+32,340,8)
             pygame.draw.rect(surface,(55,68,80),rect,border_radius=4)
-            x = rect.left+round(rect.width*tuning[key]/100)
+            x = rect.left+round(rect.width*value/100)
             pygame.draw.rect(surface,ui.ACCENT,(rect.left,rect.top,max(1,x-rect.left),rect.height),border_radius=4)
             pygame.draw.circle(surface,ui.TEXT,(x,rect.centery),9)
             self.slider_areas.append((key,rect))
         values = f"V{tuning['climb']}  A{tuning['acceleration']}  S{tuning['steering']}"
         ui.text(surface,values,fonts.mono,ui.ACCENT,(640,535))
-        ui.text(surface,'Drag sliders. Higher values respond faster.',fonts.small,ui.MUTED,(640,572))
+        ui.text(surface,'Range: 5 seconds outside ends Ring Mode.',fonts.small,ui.MUTED,(640,572))
 
     def move_slider(self, key, x):
         rect = next(rect for name,rect in self.slider_areas if name == key)

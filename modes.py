@@ -8,6 +8,7 @@ import pygame
 import ui
 import world
 from camera import SCREEN_SCALE, project, project_polygon, view_origin
+from units import FEET_PER_METRE
 
 
 
@@ -60,18 +61,21 @@ class FreeFlight(Mode):
 class RingRun(Mode):
     name = 'Ring Mode'
     key = 'rings'
-    description = ('Thread the gold gates before the clock runs out. Each gate adds time; '
-                   'clear them in a row to build a combo multiplier.')
+    description = ('Follow the ring path: blue gates are larger, red gates are smaller. '
+                   'Clear gates to add time. Stay within range of the route.')
     RADIUS = 70.0
     SPACING = 760.0
     START_TIME = 30.0
     BONUS = 9.0
+    RING_TYPES = {'blue': (105.0,(65,155,255)), 'red': (45.0,(255,75,75))}
+    OFF_PATH_LIMIT = 5.0
 
     def __init__(self, game, seed=None):
         super().__init__(game)
         self.rng = np.random.default_rng(seed)
         self.rings = []
         self.active = False
+        self.ring_types = {}
         faces = []
         for i in range(10):
             angles = (i * math.tau / 10, (i+1) * math.tau / 10)
@@ -99,6 +103,11 @@ class RingRun(Mode):
         self.best_combo = 1
         self.time_left = self.START_TIME
         self.rings = []
+        self.ring_types = {}
+        self.generated = 0
+        self.route_turn = self.route_climb = 0.0
+        self.path_anchor = plane_point(atmosphere)
+        self.path_distance = self.off_path_time = 0.0
         self.cursor = (atmosphere.position[0], atmosphere.altitude, atmosphere.position[1], atmosphere.heading)
         self.add_ring(first=True)
         for _ in range(3):
@@ -109,16 +118,41 @@ class RingRun(Mode):
     def add_ring(self, first=False):
         x, y, z, heading = self.cursor
         if not first:
-            heading += self.rng.uniform(-0.4, 0.4)
-            y += self.rng.uniform(-130, 130)
+            self.route_turn = .75*self.route_turn + .25*self.rng.uniform(-.16,.16)
+            self.route_climb = .75*self.route_climb + .25*self.rng.uniform(-60,60)
+            heading += self.route_turn
+            y += self.route_climb
         x += math.sin(heading) * self.SPACING
         z += math.cos(heading) * self.SPACING
         # Keep every gate above the highest terrain under its opening.
         reach = range(-112, 113, 28)
-        clearance = max(world.obstacle_height(x + dx, z + dz) for dx in reach for dz in reach) + self.RADIUS + 40
+        clearance = max(world.obstacle_height(x + dx, z + dz) for dx in reach for dz in reach) + 105 + 40
         y = float(np.clip(y, max(clearance, 300), 2600))
         self.cursor = (x, y, z, heading)
-        self.rings.append((x, y, z, math.sin(heading), math.cos(heading)))
+        ring = (x, y, z, math.sin(heading), math.cos(heading))
+        self.rings.append(ring)
+        self.ring_types[ring] = 'blue' if self.generated%2 == 0 else 'red'
+        self.generated += 1
+        self.ring_types = {r: self.ring_types[r] for r in self.rings}
+
+    def ring_scale(self, ring):
+        kind = self.ring_types.get(ring)
+        return self.RING_TYPES[kind][0]/self.RADIUS if kind else 1.0
+
+    def ring_color(self, ring):
+        return self.RING_TYPES[self.ring_types.get(ring,'blue')][1]
+
+    @property
+    def path_range(self):
+        return (250+4750*getattr(self.game,'ring_range',50)/100)/FEET_PER_METRE
+
+    def distance_to_path(self, atmosphere):
+        points = np.array([self.path_anchor]+[r[:3] for r in self.rings],dtype=float)
+        starts,segments = points[:-1],np.diff(points,axis=0)
+        lengths = np.sum(segments*segments,axis=1)
+        point = np.array(plane_point(atmosphere))
+        along = np.clip(np.sum((point-starts)*segments,axis=1)/np.maximum(lengths,1e-9),0,1)
+        return float(np.min(np.linalg.norm(point-(starts+along[:,None]*segments),axis=1)))
 
     def ring_side(self, atmosphere, ring):
         x, _, z, nx, nz = ring
@@ -128,7 +162,7 @@ class RingRun(Mode):
         if not self.active:
             return None
         x, y, z, _, _ = self.rings[0]
-        return x, y, z, 'GATE'
+        return x, y, z, self.ring_types.get(self.rings[0],'blue').upper()+' GATE'
 
     def update(self, dt, atmosphere):
         super().update(dt, atmosphere)
@@ -144,7 +178,7 @@ class RingRun(Mode):
             crossing = np.array(self.previous_position) + fraction * (current - self.previous_position)
             horizontal = (crossing[0] - x) * nz - (crossing[2] - z) * nx
             vertical = crossing[1] - y
-            apothem = (self.RADIUS - 3) * math.cos(math.pi / 10)
+            apothem = (self.RADIUS - 3) * self.ring_scale(ring) * math.cos(math.pi / 10)
             inside = all(horizontal * math.cos((i + 0.5) * math.tau / 10 + self.gate_rotation(ring))
                          + vertical * math.sin((i + 0.5) * math.tau / 10 + self.gate_rotation(ring)) <= apothem for i in range(10))
             if inside:
@@ -160,10 +194,16 @@ class RingRun(Mode):
                 self.game.flash('MISSED', ui.ALERT)
                 self.game.sound('miss')
             self.rings.pop(0)
+            self.path_anchor = ring[:3]
             self.add_ring()
             side = self.ring_side(atmosphere, self.rings[0])
         self.side = side
         self.previous_position = plane_point(atmosphere)
+        self.path_distance = self.distance_to_path(atmosphere)
+        self.off_path_time = self.off_path_time+dt if self.path_distance > self.path_range else 0.0
+        if self.off_path_time >= self.OFF_PATH_LIMIT:
+            self.finish('Left the ring path')
+            return
         if self.time_left <= 0:
             self.finish()
 
@@ -172,11 +212,11 @@ class RingRun(Mode):
             self.combo = 1
             self.time_left -= 5
 
-    def finish(self):
+    def finish(self, title='Run complete'):
         self.active = False
         self.finished = True
         record = self.game.scores.best('ring_best', self.score)
-        self.summary = {'title': 'Run complete', 'score': self.score, 'record': record,
+        self.summary = {'title': title, 'score': self.score, 'record': record,
                         'lines': [('Gates cleared', f'{self.passed}'), ('Best combo', f'×{self.best_combo}'),
                                   ('Personal best', f'{max(self.score, self.game.scores.get("ring_best")):,}')]}
 
@@ -190,7 +230,8 @@ class RingRun(Mode):
         return np.array([[nz*c,-nz*s,nx],[s,c,0],[-nx*c,nx*s,nz]],dtype='f4')
 
     def gate_faces(self, ring):
-        return self.local_faces @ self.gate_matrix(ring).T + np.array(ring[:3])
+        scale = self.ring_scale(ring)
+        return (self.local_faces*np.array([scale,scale,1])) @ self.gate_matrix(ring).T + np.array(ring[:3])
 
     def world_mesh(self, atmosphere):
         positions, normals, colors = [], [], []
@@ -199,9 +240,12 @@ class RingRun(Mode):
         for index, ring in enumerate(self.rings):
             if math.dist(plane_point(atmosphere), ring[:3]) > 6000:
                 continue
-            base = np.array(ui.ACCENT if index == 0 else (232,236,232), dtype=float) / 255
+            base = np.array(self.ring_color(ring), dtype=float) / 255
+            if index:
+                base *= .75
             rotation = self.gate_matrix(ring)
-            vertices = self.local_vertices @ rotation.T + np.array(ring[:3])
+            scale = self.ring_scale(ring)
+            vertices = (self.local_vertices*np.array([scale,scale,1])) @ rotation.T + np.array(ring[:3])
             normal = self.local_normals @ rotation.T
             shade = 0.65 + 0.35 * np.abs(normal @ atmosphere.sun_direction)
             positions.append(vertices)
@@ -220,7 +264,7 @@ class RingRun(Mode):
     def draw_ring(self, surface, atmosphere, ring, index, size, k):
         faces = []
         eye = np.array(view_origin(atmosphere))
-        base = np.array(ui.ACCENT if index == 0 else (232,236,232))
+        base = np.array(self.ring_color(ring))*(1 if index == 0 else .75)
         for quad in self.gate_faces(ring):
             points = project_polygon(atmosphere, quad, size)
             if len(points) >= 3:
@@ -239,6 +283,11 @@ class RingRun(Mode):
         ui.label(surface, 'Score', fonts.tiny, (630, 110))
         ui.text(surface, f'{self.score:,}', fonts.mono, ui.TEXT, (630, 126))
         ui.text(surface, f'×{self.combo}', fonts.h2, ui.ACCENT if self.combo > 1 else ui.DIM, (744, 131), 'midright')
+        outside = self.path_distance > self.path_range
+        label = f'PATH {self.path_distance*FEET_PER_METRE:,.0f} / {self.path_range*FEET_PER_METRE:,.0f} ft'
+        if outside:
+            label += f' · RETURN IN {max(0,self.OFF_PATH_LIMIT-self.off_path_time):.1f}s'
+        ui.text(surface,label,fonts.small,ui.ALERT if outside else ui.TEXT,(640,174),'midtop',shadow=True)
 
     def best_text(self):
         best = self.game.scores.get('ring_best')
