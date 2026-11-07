@@ -396,7 +396,7 @@ class RaceMode(RingRun):
                 count = max(1, math.ceil(-self.clock))
                 pulse = 1 - (-self.clock) % 1
                 ui.text(surface, str(count), fonts.display, ui.ACCENT, (640, 236), 'center', shadow=True,
-                        alpha=255 * min(1, 0.4 + pulse))
+                        alpha=255 * min(1, 0.6 + pulse))
                 ui.label(surface, f'Round {info["round"]}  ·  {total} gates  ·  get ready', fonts.tiny, (640, 296),
                          ui.TEXT, 'midtop', shadow=True)
                 self.draw_board(surface, fonts, info)

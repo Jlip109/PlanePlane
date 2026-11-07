@@ -196,8 +196,8 @@ def marker(atmosphere, point, size, margin=40):
             return 'tag', x, y
         dx, dy = x - width / 2, y - height / 2
     else:
-        # Behind the camera: point the way you would turn to face it.
-        dx, dy = side, -rise
+        # Behind the camera: point the way you would turn to face it (mostly sideways, mid-height).
+        dx, dy = side, -rise * 0.25
         if abs(dx) < 1e-6 and abs(dy) < 1e-6:
             dx, dy = 0.0, 1.0
     stretch = min((width / 2 - margin) / max(abs(dx), 1e-9), (height / 2 - margin) / max(abs(dy), 1e-9))
@@ -228,7 +228,7 @@ class PilotMarkers:
         size = surface.get_size()
         eye = atmosphere.camera
         for player in atmosphere.remote_players:
-            point = (player['x'], player['y'] + 7, player['z'])
+            point = (player['x'], player['y'] + 3, player['z'])
             distance = math.dist(eye, point)
             name = player['name']
             if player['id'] in places:
