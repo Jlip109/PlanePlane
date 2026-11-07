@@ -36,8 +36,6 @@ class Balloon:
 
 
 class SkyLife:
-    help = ''
-
     def __init__(self, seed=None):
         self.rng = np.random.default_rng(seed)
         self.balloons = []

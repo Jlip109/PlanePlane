@@ -21,7 +21,7 @@ STYLES = [
     ('GARDEN', 16.0, 0.55, 0.0, (0.27, 0.42, 0.31), (0.52, 0.30, 0.22), (0.80, 0.76, 0.66), (1.00, 0.82, 0.55)),
     ('CAPITAL', 150.0, 0.82, 1.0, (0.62, 0.58, 0.50), (0.45, 0.45, 0.46), (0.72, 0.67, 0.57), (1.00, 0.86, 0.60)),
     ('HARBOR', 13.0, 0.50, 0.0, (0.86, 0.87, 0.88), (0.28, 0.42, 0.62), (0.90, 0.90, 0.86), (1.00, 0.84, 0.62)),
-    ('SPIRE', 430.0, 0.60, 1.0, (0.85, 0.88, 0.92), (0.60, 0.66, 0.74), (0.86, 0.89, 0.93), (0.45, 0.95, 1.00)),
+    ('SPIRE', 860.0, 0.60, 1.0, (0.85, 0.88, 0.92), (0.60, 0.66, 0.74), (0.86, 0.89, 0.93), (0.45, 0.95, 1.00)),
     ('VILLAGE', 11.0, 0.50, 0.0, (0.60, 0.25, 0.18), (0.36, 0.30, 0.27), (0.85, 0.80, 0.70), (1.00, 0.80, 0.50)),
 ]
 VILLAGE_STYLE = 6
@@ -218,9 +218,10 @@ def raw_terrain_np(x, z):
     return 100 + 130 * np.sin(x / 1700) * np.cos(z / 1500)
 
 
-def ground_height_np(x, z):
+def ground_height_np(x, z, places=None):
+    """places: settlements_np() for (roughly) these points, to skip recomputing it."""
     height = raw_terrain_np(x, z)
-    found, cx, cz, radius, level, _ = settlements_np(x, z)
+    found, cx, cz, radius, level, _ = places if places is not None else settlements_np(x, z)
     safe = np.maximum(radius, 1)
     flat = np.where(found, 1 - smoothstep_np(safe * 0.9, safe * 1.3, np.hypot(x - cx, z - cz)), 0)
     return np.maximum(height + (level - height) * flat, WATER)
@@ -235,7 +236,7 @@ def season_palette(season):
     ][season]
 
 
-def land_color_np(x, z, distance, season, night):
+def land_color_np(x, z, distance, season, night, places=None):
     """Flat ground colour (fields, forest, lakes, roads, rooftops) and night-light emission."""
     palette = np.array(season_palette(season), np.float32)
     # Fields: rows of different widths, staggered like bricks.
@@ -268,7 +269,7 @@ def land_color_np(x, z, distance, season, night):
     color = color + (np.array([0.30, 0.31, 0.33]) - color) * road_mask[..., None]
     light = road_mask * 0.25
 
-    found, cx, cz, radius, level, style = settlements_np(x, z)
+    found, cx, cz, radius, level, style = places if places is not None else settlements_np(x, z)
     i, j = np.floor(x / CELL), np.floor(z / CELL)
     ii, jj = i.astype(np.int64), j.astype(np.int64)
     village = style == VILLAGE_STYLE

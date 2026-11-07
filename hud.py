@@ -188,7 +188,7 @@ class Hud:
 
     def draw_controls(self, surface):
         fonts = self.fonts
-        box = pygame.Rect(240, 130, 800, 450)
+        box = pygame.Rect(240, 104, 800, 508)
         ui.panel(surface, box, (9, 18, 27, 236))
         ui.label(surface, 'Controls', fonts.tiny, (box.left + 40, box.top + 30), ui.ACCENT)
         columns = [(box.left + 40, CONTROLS[0:1] + CONTROLS[2:3]), (box.left + 420, CONTROLS[1:2])]
@@ -200,6 +200,6 @@ class Hud:
                 for key, action in rows:
                     cap = ui.key_cap(surface, key, fonts, (x, y))
                     ui.text(surface, action, fonts.small, ui.MUTED, (x + 132, cap.centery), 'midleft')
-                    y += 32
-                y += 16
+                    y += 31
+                y += 14
         ui.text(surface, 'Press H to close', fonts.small, ui.DIM, (box.right - 40, box.bottom - 24), 'bottomright')

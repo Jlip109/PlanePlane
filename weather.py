@@ -97,8 +97,6 @@ def current_weather(latitude, longitude):
 
 
 class LiveWeather:
-    help = 'L live weather (start with --city "Your City")'
-
     def __init__(self, city=None):
         self.city = city or DEFAULT_CITY
         self.enabled = False

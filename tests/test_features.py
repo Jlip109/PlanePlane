@@ -200,8 +200,14 @@ def test_free_flight_greets_each_city_once(atmosphere, fake_game):
     fly_to(atmosphere, 0, 700, 3400, 0)
     free.update(0.1, atmosphere)
     assert fake_game.scores.get('visited', []) == ['TROY']
-    fake_game.radio.update(0.1)
-    assert 'first time' in fake_game.radio.current[1]
+    calls = [call[1] for call in fake_game.radio.queue]
+    assert any('first time' in call for call in calls)
+    fly_to(atmosphere, 0, 700, -900, 0)
+    free.update(0.1, atmosphere)
+    fly_to(atmosphere, 0, 700, 3400, 0)
+    free.update(0.1, atmosphere)
+    later = [call[1] for call in fake_game.radio.queue]
+    assert sum('first time' in call for call in later) == 1 and 'meters per second' in later[-1]
 
 
 # ------------------------------------------------------------------ the game director

@@ -9,8 +9,6 @@ DROPS = 260
 
 
 class WeatherEffects:
-    help = '3 overcast (rain)   4 storm (lightning)'
-
     def __init__(self, seed=None):
         self.rng = np.random.default_rng(seed)
         self.drops = self.rng.random((DROPS, 2))

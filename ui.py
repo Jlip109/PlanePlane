@@ -39,11 +39,6 @@ class Fonts:
         self.tiny = text(12, bold=True)
         self.mono = mono(20)
         self.mono_small = mono(15)
-        # older code expects (font, small, title)
-        self.legacy = (mono(18), mono(14), mono(27))
-
-    def __iter__(self):
-        return iter(self.legacy)
 
 
 _cache = {}

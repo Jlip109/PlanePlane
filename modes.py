@@ -72,6 +72,14 @@ class FreeFlight(Mode):
     def start(self, atmosphere):
         super().start(atmosphere)
         self.current_city = world.city_at(atmosphere.position[0], atmosphere.position[1])
+        callsign = self.game.pilot.role.title() if hasattr(self.game, 'pilot') else 'pilot'
+        hour = atmosphere.hour
+        greeting = 'Good morning' if 4 <= hour < 12 else 'Good afternoon' if hour < 18 else 'Good evening'
+        nearest, distance = world.nearest_city(*atmosphere.position)
+        name = world.CITIES[nearest][0]
+        self.game.radio.say(characters.TOWERS[name], f'{greeting}, {callsign}. {name.title()} is '
+                                                     f'{distance / 1000:.0f} km out. W and S to climb and descend, A and D '
+                                                     'to turn, Space to boost. Press H any time for the rest.')
 
     def update(self, dt, atmosphere):
         super().update(dt, atmosphere)
@@ -140,8 +148,9 @@ class RingRun(Mode):
             y += self.rng.uniform(-130, 130)
         x += math.sin(heading) * self.SPACING
         z += math.cos(heading) * self.SPACING
-        clearance = max(world.obstacle_height(x + dx, z + dz)
-                        for dx in (-120, 0, 120) for dz in (-120, 0, 120)) + self.RADIUS + 40
+        # Sample every building lot under the gate so even a skinny tower can't spear it.
+        reach = range(-112, 113, 28)
+        clearance = max(world.obstacle_height(x + dx, z + dz) for dx in reach for dz in reach) + self.RADIUS + 40
         y = float(np.clip(y, max(clearance, 300), 2600))
         self.cursor = (x, y, z, heading)
         self.rings.append((x, y, z, math.sin(heading), math.cos(heading)))
@@ -371,6 +380,38 @@ class SkyCourier(Mode):
         self.summary = {'title': 'Shift complete', 'score': self.score, 'record': record,
                         'lines': [('Deliveries', f'{self.done}'), ('On time', f'{self.on_time} / {self.done}'),
                                   ('Personal best', f'{max(self.score, self.game.scores.get("courier_best")):,}')]}
+
+    def draw_world(self, surface, atmosphere):
+        """A light beam over the target city and the drop-zone circle on the ground."""
+        if self.finished or not self.job:
+            return
+        index = self.job['origin' if self.job['stage'] == 'pickup' else 'destination']
+        _, cx, cz, radius, _, _ = world.CITIES[index]
+        level = world.CITY_LEVELS[index]
+        size = surface.get_size()
+        k = size[1] * SCREEN_SCALE
+        pulse = 0.75 + 0.25 * math.sin(self.time * 3)
+        base = project(atmosphere, (cx, level, cz), size)
+        top = project(atmosphere, (cx, level + 900, cz), size)
+        if base and top and base[2] < 30000:
+            width = max(3, int(40 * k / base[2]))
+            fade = 1 - min(1.0, max(0.0, (base[2] - 12000) / 18000))
+            for scale, alpha in ((3.0, 40), (1.0, 120)):
+                w = width * scale / 2
+                pygame.draw.polygon(surface, (*ui.ACCENT, int(alpha * pulse * fade)),
+                                    [(base[0] - w, base[1]), (base[0] + w, base[1]),
+                                     (top[0] + w * 0.4, top[1]), (top[0] - w * 0.4, top[1])])
+        zone = radius * 0.75
+        points = []
+        for step in range(73):
+            angle = step / 72 * math.tau
+            points.append(project(atmosphere, (cx + math.cos(angle) * zone, level + 4, cz + math.sin(angle) * zone), size))
+        for n, (a, b) in enumerate(zip(points, points[1:])):
+            if n % 2 or a is None or b is None or a[2] > 9000:
+                continue
+            if max(abs(a[0]), abs(a[1]), abs(b[0]), abs(b[1])) > 20000:
+                continue
+            pygame.draw.line(surface, (*ui.ACCENT, int(200 * pulse)), a[:2], b[:2], max(2, int(6 * k / a[2])))
 
     def draw_hud(self, surface, atmosphere, fonts):
         if self.finished or not self.job:

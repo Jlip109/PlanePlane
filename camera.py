@@ -6,10 +6,6 @@ import world
 
 # Pixels per unit of screen-space ray offset, as a fraction of window height.
 SCREEN_SCALE = 0.924444
-def terrain_height(x, z):
-    return world.ground_height(x, z)
-
-
 def view_angles(atmosphere):
     t = atmosphere.elapsed
     shake = math.sin(t * 9) * atmosphere.wind * atmosphere.cover * 0.00012 * (1 + atmosphere.risk / 100)

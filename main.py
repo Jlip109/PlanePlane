@@ -348,12 +348,14 @@ class Atmosphere:
         below = dy < -0.008
         safe_dy = np.minimum(dy[below], -0.008)
         rx, rz = dx[below], dz[below]
-        distance = np.maximum(0, (100 - camera_y) / safe_dy)
-        for _ in range(4):
-            x, z = camera_x + rx * distance, camera_z + rz * distance
-            distance = np.maximum(0, (world.ground_height_np(x, z) - camera_y) / safe_dy)
+        distance = np.maximum(0, (world.raw_terrain_np(camera_x, camera_z) - camera_y) / safe_dy)
         x, z = camera_x + rx * distance, camera_z + rz * distance
-        color, lamps = world.land_color_np(x, z, distance, self.ground_mode, night)
+        # Which town each pixel lands in barely changes between iterations, so look it up once.
+        places = world.settlements_np(x, z)
+        for _ in range(3):
+            distance = np.maximum(0, (world.ground_height_np(x, z, places) - camera_y) / safe_dy)
+            x, z = camera_x + rx * distance, camera_z + rz * distance
+        color, lamps = world.land_color_np(x, z, distance, self.ground_mode, night, places)
         daylight = float(smoothstep(-0.12, 0.35, self.sun_direction[1]))
         light = 0.09 + daylight * 0.85
         ground = color * light * 255 + np.array([255, 184, 97]) * (lamps * 0.9)[..., None]
@@ -583,7 +585,6 @@ def main(argv=None):
             hud.fill((0, 0, 0, 0))
             renderer = f'GPU {gpu.scale:.0%}' if gpu and gpu.scale < 1 else ('GPU' if gpu else 'CPU')
             game.draw_hud(hud, clock.get_fps(), renderer)
-            call_systems(systems, 'draw_hud', hud, atmosphere, fonts)
             scale = min(width / 1280, height / 720)
             hud_size = (max(1, round(1280 * scale)), max(1, round(720 * scale)))
             offset = ((width - hud_size[0]) // 2, (height - hud_size[1]) // 2)
