@@ -154,11 +154,18 @@ class Hud:
         if target:
             pos, inside = to_radar(target[0], target[2])
             pygame.draw.circle(surface, ui.ACCENT, pos, 6, 2)
-        for player in atmosphere.remote_players:
-            pos, inside = to_radar(player['x'],player['z'])
-            pygame.draw.circle(surface,(90,210,245),pos,3)
         pygame.draw.polygon(surface, ui.TEXT, [(center[0], center[1] - 7), (center[0] - 5, center[1] + 5),
                                                (center[0], center[1] + 2), (center[0] + 5, center[1] + 5)])
+        for player in atmosphere.remote_players:
+            # Drawn over your own arrow and pushed clear of it, so a wingman right beside you still shows.
+            pos, inside = to_radar(player['x'],player['z'])
+            dx, dy = pos[0] - center[0], pos[1] - center[1]
+            length = math.hypot(dx, dy)
+            if length < 11:
+                dx, dy = (dx / length * 11, dy / length * 11) if length > 1e-6 else (0, -11)
+                pos = (center[0] + dx, center[1] + dy)
+            pygame.draw.circle(surface, ui.INK, pos, 6)
+            pygame.draw.circle(surface, PILOT_COLOR, pos, 4)
         ui.label(surface, f'{self.radar_range / 1609.344:.0f} mi', fonts.tiny, (center[0], center[1] + radius + 6),
                  ui.DIM, 'midtop')
 

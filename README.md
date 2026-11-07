@@ -119,9 +119,45 @@ To test online mode locally: `python server.py --websocket 8080` and `python mai
 a minute to wake, so open `https://YOUR-SERVICE.onrender.com/health` a few minutes before a demo
 (the game also waits up to 75 s when connecting).
 
-This is a LAN multiplayer foundation with client-simulated flight. Competitive authority,
-authentication, matchmaking, shared scoring and cross-player collisions are future work.
-Ring scoring currently runs locally on each client.
+Use `127.0.0.1` rather than `localhost` on Windows (it avoids a slow IPv6 attempt first).
+
+Finding each other: every other pilot has a floating name tag with their distance, an arrow on the
+screen edge when they are off screen or behind you, and a blue dot on the map. New pilots join just
+behind and beside someone already flying (same heading, height and speed), and Restart online
+puts you next to another pilot. The server keeps a slow shared clock (`--hour 10 --day-length 3600`
+by default) so a demo stays in daylight.
+
+### Multiplayer Ring Race
+
+Everyone in the room who picks race mode races the same gold gates:
+
+```powershell
+python server.py --host 0.0.0.0 --port 8765          # or: python server.py --websocket 8080
+python main.py --connect 127.0.0.1:8765 --name Ann --mode race
+python main.py --connect 127.0.0.1:8765 --name Bo --mode race
+```
+
+Online it is the same with `--connect wss://YOUR-SERVICE.onrender.com`. While connected, the main
+menu (ESC, Main Menu) also offers **Ring Race**.
+
+- The server runs the rounds: a 5 s countdown on every screen (everyone is parked on a starting
+  grid), the race through 12 gates, a results board for 12 s, then a new round on a new course.
+  Every client builds the course from the round seed the server sends, so all courses are identical.
+- Miss a gate and you have to turn back through it. The panel shows your position, gates and time;
+  the board on the right shows the live order with gaps to the leader.
+- Join mid-race and you spectate (the course is shown) until the next round. Leaving mid-race is a DNF.
+  A round ends when every racer has finished or left, 45 s after the winner, or after 5 minutes.
+- The server is authoritative: it only accepts one more gate at a time, from near that gate, no
+  sooner than a straight Mach 5 line allows, and it times finishes itself (a client's own finish
+  time is used only if it is within a second of when the server heard it).
+- `python server.py --countdown 3 --results 8` shortens the cycle for demos.
+
+Protocol version 2 adds optional `racing`, `round`, `gates`, `finish` and `idle` fields to state
+messages and a `race` block plus server `time` to snapshots. Version 1 clients can still join and fly
+together; they just never race.
+
+Flight stays client-simulated, so this is a friendly-competition setup rather than a cheat-proof
+one: authentication, matchmaking and cross-player collisions are future work.
 
 Both selectable models use the same flight physics. The original `.blend` / `.blend1` files
 and runtime `.npz` exports are under `assets/`; Blender is only needed when exporting a new model.

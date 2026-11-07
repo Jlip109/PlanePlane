@@ -505,3 +505,104 @@ def test_pilot_markers_tag_on_screen_and_arrow_off_screen(atmosphere, fonts, tmp
     PilotMarkers(game).draw_world(overlay, atmosphere)
     assert overlay.get_bounding_rect().width > 0
     assert PilotMarkers(game).places() == {'p': 2}
+
+
+# ------------------------------------------------------------------ multiplayer usability fixes
+
+
+def snapshot_client(players):
+    client = NetworkClient.__new__(NetworkClient)
+    client.player_id = 'me'
+    client.status = 'Connected'
+    client.lock = threading.Lock()
+    client.snapshots = [(time.monotonic() - 1, players), (time.monotonic(), players)]
+    return client
+
+
+def test_remote_planes_lead_along_their_path_and_idle_pilots_are_hidden():
+    flying = dict(clean_state(state(x=100., z=0., heading=math.pi / 2, speed=1000.)), id='a', name='A')
+    idle = dict(clean_state(state(idle=True)), id='b', name='B')
+    client = snapshot_client({'a': flying, 'b': idle, 'me': dict(flying, id='me')})
+    assert [p['id'] for p in client.players()] == ['a'] and client.players()[0]['x'] == pytest.approx(100)
+    led = client.players(0.15)[0]
+    assert led['x'] == pytest.approx(250) and led['z'] == pytest.approx(0, abs=1e-6)
+    with pytest.raises(ValueError):
+        clean_state(state(idle='yes'))
+
+
+def test_spawn_near_matches_heading_altitude_and_speed():
+    from network import spawn_near
+    anchor = clean_state(state(x=1000., y=1200., z=3000., heading=-2.0, speed=400.))
+    spots = [spawn_near(anchor, count) for count in range(1, 9)]
+    for spot in spots:
+        assert spot['heading'] == -2.0 and spot['speed'] == 400. and spot['y'] >= 1200
+        assert 100 < math.dist((spot['x'], spot['z']), (1000., 3000.)) < 250
+    assert len({(round(s['x']), round(s['z'])) for s in spots}) == 8
+
+
+def test_restart_online_respawns_beside_another_pilot(atmosphere, fonts, tmp_path):
+    from game import Game
+    from scores import Scores
+    game = Game(atmosphere, fonts, None, 'free', scores=Scores(tmp_path / 's.json'), network=FakeNetwork())
+    atmosphere.remote_players = [dict(clean_state(state(x=8000., y=2000., z=9000., heading=1.0)), id='p', name='P')]
+    game.act('restart')
+    assert math.dist(atmosphere.position, (8000., 9000.)) < 250 and atmosphere.heading == 1.0
+
+
+def test_tcp_client_reports_garbage_instead_of_dying_silently():
+    async def scenario():
+        async def handler(reader, writer):
+            await reader.readline()
+            writer.write(encode({'type': 'welcome', 'version': VERSION, 'id': 'x', 'seed': 1,
+                                 'spawn': {'x': 0, 'y': 700, 'z': 0}, 'hour': 10}))
+            writer.write(b'[1,2,3]\n')
+            await writer.drain()
+            await asyncio.sleep(1)
+            writer.close()
+        server = await asyncio.start_server(handler, '127.0.0.1', 0)
+        port = server.sockets[0].getsockname()[1]
+        client = await asyncio.to_thread(NetworkClient, f'127.0.0.1:{port}')
+        for _ in range(40):
+            await asyncio.sleep(.05)
+            if client.status != 'Connected':
+                break
+        assert client.status.startswith('Disconnected')
+        await asyncio.to_thread(client.close)
+        server.close()
+        await server.wait_closed()
+    asyncio.run(scenario())
+
+
+def test_connection_failures_exit_with_a_hint():
+    import main
+
+    async def scenario():
+        room = RoomServer()
+        port = await room.start(port=0)
+        try:
+            for address, hint in ((f'ws://127.0.0.1:{port}', 'without --websocket'),
+                                  ('ws://', 'Check the address'), ('127.0.0.1:1', 'server.py running')):
+                args = main.parse_args(['--connect', address])
+                with pytest.raises(SystemExit) as caught:
+                    await asyncio.to_thread(main.connect, args)
+                assert 'Could not join server' in str(caught.value) and hint in str(caught.value)
+        finally:
+            await room.close()
+    asyncio.run(scenario())
+
+
+def test_remote_mesh_skips_planes_behind_or_far_and_follows_daylight(atmosphere):
+    from plane import PlaneModel, remote_aircraft_mesh
+    models = {'classic': PlaneModel('classic')}
+    atmosphere.position, atmosphere.altitude, atmosphere.heading = np.array([0., 0.]), 1000., 0.
+    ahead = dict(x=0., y=1000., z=400., heading=0., bank=0., flight_pitch=0., model='classic')
+    behind = dict(ahead, z=-600.)
+    far = dict(ahead, z=3000.)
+    count = len(models['classic'].positions)
+    assert len(remote_aircraft_mesh([ahead, behind], models, atmosphere)[0]) == count
+    assert remote_aircraft_mesh([far], models, atmosphere, 1500) is None
+    atmosphere.hour = 12
+    noon = remote_aircraft_mesh([ahead], models, atmosphere)[2].mean()
+    atmosphere.hour = 0
+    midnight = remote_aircraft_mesh([ahead], models, atmosphere)[2].mean()
+    assert midnight < noon * 0.5

@@ -11,16 +11,21 @@ from camera import SCREEN_SCALE, view_angles, view_origin, project_polygon
 PLANE_MODELS = {'classic': ('Original', 'plane_mesh.npz'), 'f15': ('F-15', 'f15_mesh.npz')}
 
 
-def remote_aircraft_mesh(players, models, atmosphere):
+def remote_aircraft_mesh(players, models, atmosphere, max_distance=8000):
     positions, normals, colors = [], [], []
+    eye = np.array(view_origin(atmosphere))
+    heading, pitch = view_angles(atmosphere)
+    forward = np.array([math.sin(heading)*math.cos(pitch), math.sin(pitch), math.cos(heading)*math.cos(pitch)])
+    # Same daylight curve as the local aircraft (the mesh is drawn unlit, so the light is baked in here).
+    daylight = float(np.clip((float(atmosphere.sun_direction[1]) + 0.12) / 0.47, 0, 1))
     for player in players:
         center = np.array([player['x'],player['y'],player['z']])
-        if np.linalg.norm(center-np.array(view_origin(atmosphere))) > 8000:
-            continue
+        if np.linalg.norm(center-eye) > max_distance or (center-eye) @ forward < -30:
+            continue  # too far, or behind the camera
         model = models[player['model']]
         rotation = plane_rotation(SimpleNamespace(**player))
         normal = model.normals @ rotation.T
-        light = .45 + .55 * np.maximum(0,normal @ atmosphere.sun_direction)
+        light = 0.24 + daylight * (0.35 + 0.41 * np.maximum(0,normal @ atmosphere.sun_direction))
         positions.append(model.positions @ rotation.T + center)
         normals.append(normal)
         colors.append(model.colors * light[:,None])

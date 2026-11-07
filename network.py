@@ -17,6 +17,8 @@ from units import MAX_FLIGHT_SPEED_MPS
 VERSION = 2
 SUPPORTED_VERSIONS = (1, 2)  # version 1 clients still fly together; they just never race
 TICK_RATE = 20
+INTERPOLATION_DELAY = .1
+LEAD = .15  # extrapolate remote planes this far ahead so formation partners appear where they really are
 MAX_LINE = 262144
 STATE_FIELDS = ('x','y','z','heading','bank','flight_pitch','speed','fuel')
 
@@ -41,11 +43,12 @@ def clean_state(message):
     result['heading'] = (result['heading']+math.pi) % math.tau-math.pi
     result['bank'] = min(math.pi,max(-math.pi,result['bank']))
     result['flight_pitch'] = min(1.5,max(-1.5,result['flight_pitch']))
-    # Optional race progress (protocol 2). Absent fields mean "not racing".
-    racing = message.get('racing',False)
-    if not isinstance(racing,bool):
-        raise ValueError('Invalid racing flag')
-    result['racing'] = racing
+    # Optional flags (protocol 2). Absent fields mean "flying, not racing".
+    for name in ('racing','idle'):
+        flag = message.get(name,False)
+        if not isinstance(flag,bool):
+            raise ValueError(f'Invalid {name} flag')
+        result[name] = flag
     for name,limit in (('round',2**31),('gates',race.GATES)):
         value = message.get(name,0)
         if isinstance(value,bool) or not isinstance(value,int) or not 0 <= value <= limit:
@@ -57,6 +60,17 @@ def clean_state(message):
         raise ValueError('Invalid finish time')
     result['finish'] = None if finish is None else float(finish)
     return result
+
+
+def spawn_near(anchor, count=1):
+    """A spawn just behind and beside a pilot's state, matching their heading, altitude and speed."""
+    side = (40.0+(count//2 % 4)*30.0)*(1 if count % 2 else -1)
+    sh,ch = math.sin(anchor['heading']),math.cos(anchor['heading'])
+    x = anchor['x']-sh*140+ch*side
+    z = anchor['z']-ch*140-sh*side
+    y = min(5400.0,max(anchor['y'],race.world.obstacle_height(x,z)+250))
+    speed = min(MAX_FLIGHT_SPEED_MPS,max(45.0,anchor.get('speed',75.0)))
+    return {'x':x,'y':y,'z':z,'heading':anchor['heading'],'speed':speed}
 
 
 def clean_race(info):
@@ -99,8 +113,10 @@ def clean_race(info):
 
 
 class RoomServer:
-    def __init__(self, seed=1, max_players=100, **race_options):
+    def __init__(self, seed=1, max_players=100, hour=10.0, day_length=3600.0, **race_options):
         self.seed = seed
+        self.hour = hour % 24
+        self.day_length = min(86400.0,max(10.0,day_length))
         self.max_players = min(100,max(1,max_players))
         self.peers = {}
         self.race = race.RaceDirector(seed,**race_options)
@@ -151,11 +167,12 @@ class RoomServer:
             if not isinstance(model,str) or model not in PLANE_MODELS:
                 raise ValueError('Unknown aircraft')
             spawn = self.spawn_point()
-            state = dict(clean_state(dict(spawn,bank=0.,flight_pitch=0.,speed=75.,fuel=100.,model=model)))
+            state = clean_state(dict(spawn,bank=0.,flight_pitch=0.,fuel=100.,model=model))
             self.peers[player_id] = {'writer':writer,'name':name,'state':state}
-            hour = (9+(time.monotonic()-self.started)*.1) % 24
+            # A slow shared clock (default: one day per hour, starting mid-morning) keeps demos in daylight.
+            hour = (self.hour+(time.monotonic()-self.started)*24/self.day_length) % 24
             writer.write(encode({'type':'welcome','version':hello['version'],'id':player_id,'seed':self.seed,
-                                 'spawn':spawn,'hour':hour,'time':time.monotonic()}))
+                                 'spawn':spawn,'hour':hour,'day_length':self.day_length,'time':time.monotonic()}))
             await writer.drain()
             while raw := await asyncio.wait_for(reader.readline(),30):
                 message = json.loads(raw)
@@ -182,16 +199,10 @@ class RoomServer:
 
     def spawn_point(self):
         """Join just behind and beside the room's longest-flying pilot, facing the same way, so you see them."""
-        if not self.peers:
-            return {'x':0.0,'y':700.0,'z':-900.0,'heading':0.0}
-        anchor = next(iter(self.peers.values()))['state']
-        count = len(self.peers)
-        side = (40.0+(count//2 % 4)*30.0)*(1 if count % 2 else -1)
-        sh,ch = math.sin(anchor['heading']),math.cos(anchor['heading'])
-        x = anchor['x']-sh*160+ch*side
-        z = anchor['z']-ch*160-sh*side
-        y = min(5400.0,max(anchor['y'],race.world.obstacle_height(x,z)+250))
-        return {'x':x,'y':y,'z':z,'heading':anchor['heading']}
+        flying = [peer['state'] for peer in self.peers.values() if not peer['state'].get('idle')]
+        if not flying:
+            return {'x':0.0,'y':700.0,'z':-900.0,'heading':0.0,'speed':75.0}
+        return spawn_near(flying[0],len(self.peers))
 
     def tick_race(self):
         now = time.monotonic()
@@ -435,11 +446,13 @@ class NetworkClient:
         with self.lock:
             return self.race
 
-    def publish(self, atmosphere, progress=None):
+    def publish(self, atmosphere, progress=None, idle=False):
         state = {'type':'state','x':float(atmosphere.position[0]),'y':atmosphere.altitude,
                  'z':float(atmosphere.position[1]),'heading':atmosphere.heading,'bank':atmosphere.bank,
                  'flight_pitch':atmosphere.flight_pitch,'speed':atmosphere.speed,'fuel':atmosphere.fuel,
                  'model':atmosphere.plane_id}
+        if idle:
+            state['idle'] = True
         if progress:
             state.update(racing=True,round=int(progress['round']),gates=int(progress['gates']),
                          finish=progress['finish'])
@@ -468,18 +481,19 @@ class NetworkClient:
                     line,_,rest = self.pending.partition(b'\n')
                     self.pending = bytearray(rest)
                     self.handle(json.loads(line))
-        except (OSError, ValueError, KeyError, TypeError) as error:
+        except Exception as error:
             if not self.stop.is_set():
                 self.status = f'Disconnected: {error}'
         finally:
             self.socket.close()
 
-    def players(self):
+    def players(self, lead=0.0):
+        """Remote pilots interpolated INTERPOLATION_DELAY in the past, then led `lead` seconds along their path."""
         with self.lock:
             frames = list(self.snapshots)
         if not frames or not self.status.startswith('Connected'):
             return []
-        target = time.monotonic()-.1
+        target = time.monotonic()-INTERPOLATION_DELAY
         before = frames[0]
         after = frames[-1]
         for frame in frames:
@@ -492,7 +506,7 @@ class NetworkClient:
         blend = min(1,max(0,(target-before[0])/span)) if span > 0 else 1
         result = []
         for player_id,current in frames[-1][1].items():
-            if player_id == self.player_id:
+            if player_id == self.player_id or current.get('idle'):
                 continue
             a = before[1].get(player_id,current)
             b = after[1].get(player_id,current)
@@ -502,6 +516,11 @@ class NetworkClient:
                 if field == 'heading':
                     delta = (delta+math.pi)%math.tau-math.pi
                 state[field] = a[field]+delta*blend
+            if lead:
+                ahead = state['speed']*lead
+                state['x'] += math.sin(state['heading'])*math.cos(state['flight_pitch'])*ahead
+                state['z'] += math.cos(state['heading'])*math.cos(state['flight_pitch'])*ahead
+                state['y'] += math.sin(state['flight_pitch'])*ahead
             result.append(state)
         return result
 

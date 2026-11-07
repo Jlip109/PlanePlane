@@ -568,18 +568,39 @@ def open_window(pygame, args):
     return gpu
 
 
+def connect(args):
+    """Join a server, turning every failure into a one-line message with a hint instead of a traceback."""
+    try:
+        from network import NetworkClient
+        return NetworkClient(args.connect,args.name,args.plane or 'classic')
+    except ModuleNotFoundError as error:
+        raise SystemExit(f'Could not join server: {error}. Install it with: python -m pip install -r requirements.txt') from None
+    except Exception as error:
+        message = str(error) or type(error).__name__
+        online = args.connect.startswith(('ws://','wss://','http://','https://'))
+        if online and ('502' in message or '503' in message):
+            hint = 'The online server is waking up (free hosts sleep); wait a minute and try again.'
+        elif online:
+            hint = ('Check the address (e.g. ws://127.0.0.1:8080 or wss://NAME.onrender.com). '
+                    'A LAN server started without --websocket needs --connect HOST:PORT instead.')
+        elif 'closed' in message.lower():
+            hint = 'If the server was started with --websocket, use --connect ws://HOST:PORT.'
+        else:
+            hint = 'Is python server.py running there, and is the port open?'
+        raise SystemExit(f'Could not join server: {message}\n{hint}') from None
+
+
 def main(argv=None):
     args = parse_args(argv)
     network = None
     if args.connect:
-        from network import NetworkClient
         print(f'Connecting to {args.connect} ...', flush=True)
-        try:
-            network = NetworkClient(args.connect,args.name,args.plane or 'classic')
-        except (OSError,ValueError) as error:
-            raise SystemExit(f'Could not join server: {error}') from error
+        network = connect(args)
         args.seed = network.welcome['seed']
         args.hour = network.welcome['hour']
+        day_length = network.welcome.get('day_length')
+        if isinstance(day_length,(int,float)) and not isinstance(day_length,bool) and math.isfinite(day_length):
+            args.day_length = day_length
         if args.mode == 'menu':
             args.mode = 'free'
     use_gpu = args.renderer == 'gpu' or (args.renderer == 'auto' and not args.headless)
@@ -615,6 +636,7 @@ def main(argv=None):
         atmosphere.position = np.array([spawn['x'],spawn['z']])
         atmosphere.altitude = spawn['y']
         atmosphere.heading = float(spawn.get('heading',0.0))
+        atmosphere.speed = float(spawn.get('speed',atmosphere.speed))
     game.frame_limit = max(0, args.fps)
     atmosphere.wireframe = args.wireframe
     if args.altitude is not None:
@@ -622,6 +644,7 @@ def main(argv=None):
     systems = build_systems(args)
     if network:
         from hud import PilotMarkers
+        from network import LEAD
         systems.append(PilotMarkers(game))
     from plane import PlaneModel, remote_aircraft_mesh
     models = {name: PlaneModel(name) for name in ('classic','f15')}
@@ -701,16 +724,19 @@ def main(argv=None):
         game.update(dt, sim_dt)
         atmosphere.sanitize()
         if network:
+            # Only a plane that is actually flying is shown to others (not the title autopilot or a pause).
             racing = game.mode and game.state in ('flying','paused')
-            network.publish(atmosphere, game.mode.progress() if racing else None)
-            atmosphere.remote_players = network.players()
+            network.publish(atmosphere, game.mode.progress() if racing else None,
+                            idle=game.state not in ('flying','results'))
+            atmosphere.remote_players = network.players(LEAD)
         width, height = pygame.display.get_window_size()
         # A minimized window can report 0x0; skip drawing rather than scaling to nothing.
         if width > 0 and height > 0:
             atmosphere.aspect = width / height
             shade = game.scene_shade()
             world_mesh = game.mode.world_mesh(atmosphere) if game.mode and game.mode.key in ('rings','race') and game.state in ('flying','paused') else None
-            remote_mesh = remote_aircraft_mesh(atmosphere.remote_players,models,atmosphere)
+            # The CPU renderer leaves distant pilots to their name tags; full meshes cost too much there.
+            remote_mesh = remote_aircraft_mesh(atmosphere.remote_players,models,atmosphere,8000 if gpu else 1500)
             if remote_mesh is not None:
                 world_mesh = remote_mesh if world_mesh is None else tuple(
                     np.concatenate((a,b)) for a,b in zip(world_mesh,remote_mesh))

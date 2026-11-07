@@ -9,7 +9,8 @@ from network import RoomServer
 
 
 async def serve(args):
-    room = RoomServer(args.seed,args.max_players,countdown=args.countdown,results=args.results)
+    room = RoomServer(args.seed,args.max_players,hour=args.hour,day_length=args.day_length,
+                      countdown=max(0.0,args.countdown),results=max(0.0,args.results))
     if args.websocket is None:
         port = await room.start(args.host,args.port)
         print(f'PlanePlane server listening on {args.host}:{port}',flush=True)
@@ -28,6 +29,8 @@ if __name__ == '__main__':
     parser.add_argument('--port',type=int,default=8765)
     parser.add_argument('--seed',type=int,default=1)
     parser.add_argument('--max-players',type=int,choices=range(1,101),default=100)
+    parser.add_argument('--hour',type=float,default=10.0,help='Shared clock at server start (24-hour)')
+    parser.add_argument('--day-length',type=float,default=3600.0,help='Real seconds per shared 24 hours')
     parser.add_argument('--countdown',type=float,default=5.0,help='Ring Race countdown seconds')
     parser.add_argument('--results',type=float,default=12.0,help='Seconds the Ring Race results stay up')
     parser.add_argument('--websocket',type=int,nargs='?',const=8080,default=None,metavar='PORT',

@@ -85,6 +85,12 @@ class Game:
         atmosphere.vertical_speed = atmosphere.bank = atmosphere.flight_pitch = 0.0
         atmosphere.crash_timer = atmosphere.impact = 0.0
         atmosphere.fuel = 100.0
+        if self.network and atmosphere.remote_players:
+            # Online, restart next to someone instead of alone at the far-away start line.
+            from network import spawn_near
+            spawn = spawn_near(atmosphere.remote_players[0], len(atmosphere.remote_players))
+            atmosphere.position = np.array([spawn['x'], spawn['z']])
+            atmosphere.altitude, atmosphere.heading = spawn['y'], spawn['heading']
         atmosphere.reset_view()
 
     def start(self, key):
