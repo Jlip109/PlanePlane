@@ -1,0 +1,14 @@
+# One-click cloud server for PlanePlane online play (Render Blueprint, free plan).
+# Render -> New -> Blueprint -> pick this repo. The game then joins with:
+#   python main.py --connect wss://<your-service>.onrender.com --name YourName
+services:
+  - type: web
+    name: planeplane
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements-server.txt
+    startCommand: python server.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8

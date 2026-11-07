@@ -78,3 +78,61 @@ def test_invalid_network_state_is_rejected(value):
     state['x'] = value
     with pytest.raises(ValueError):
         clean_state(state)
+
+
+def test_websocket_clients_share_movement_like_tcp():
+    async def scenario():
+        room = RoomServer(seed=7)
+        port = await room.start_websocket('127.0.0.1',0)
+        clients = []
+        try:
+            first = await asyncio.to_thread(NetworkClient,f'ws://127.0.0.1:{port}','Cloud','f15')
+            clients.append(first)
+            second = await asyncio.to_thread(NetworkClient,f'http://127.0.0.1:{port}/','Two','classic')
+            clients.append(second)
+            assert first.welcome['seed'] == 7 and first.player_id != second.player_id
+            first.publish(aircraft('f15'))
+            second.publish(aircraft())
+            peers = []
+            for _ in range(60):
+                await asyncio.sleep(.05)
+                peers = second.players()
+                if peers and abs(peers[0]['x']-25) < .01:
+                    break
+            assert peers and peers[0]['id'] == first.player_id and peers[0]['model'] == 'f15'
+            await asyncio.to_thread(first.close)
+            for _ in range(40):
+                await asyncio.sleep(.05)
+                if not second.players():
+                    break
+            assert not second.players()
+        finally:
+            for client in clients:
+                await asyncio.to_thread(client.close)
+            await room.close()
+    asyncio.run(scenario())
+
+
+def test_websocket_server_health_page_and_bad_join():
+    async def scenario():
+        import urllib.request
+        from websockets.asyncio.client import connect
+        room = RoomServer()
+        port = await room.start_websocket('127.0.0.1',0)
+        try:
+            body = await asyncio.to_thread(
+                lambda: urllib.request.urlopen(f'http://127.0.0.1:{port}/health',timeout=5).read())
+            assert body.startswith(b'PlanePlane server ok')
+            async with connect(f'ws://127.0.0.1:{port}/play') as websocket:
+                await websocket.send('{"type":"join","version":999}')
+                reply = await asyncio.wait_for(websocket.recv(),5)
+                assert 'mismatch' in reply
+            assert not room.peers
+        finally:
+            await room.close()
+    asyncio.run(scenario())
+
+
+def test_unreachable_online_server_raises_cleanly():
+    with pytest.raises((OSError,ValueError)):
+        NetworkClient('ws://127.0.0.1:1','Nobody')
