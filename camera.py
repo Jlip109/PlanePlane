@@ -2,6 +2,8 @@
 
 import math
 
+import numpy as np
+
 import world
 
 # Pixels per unit of screen-space ray offset, as a fraction of window height.
@@ -65,3 +67,41 @@ def project(atmosphere, point, size):
     sy = (-rx * sh * sp + ry * cp - rz * ch * sp) / depth
     k = height * SCREEN_SCALE
     return width / 2 + sx * k, height / 2 - sy * k, depth
+
+
+NEAR = 1.0
+FAR = 40000.0
+
+
+def basis(heading, pitch):
+    """Right, up and forward unit vectors for a view heading/pitch (x east, y up, z north)."""
+    sh, ch, sp, cp = math.sin(heading), math.cos(heading), math.sin(pitch), math.cos(pitch)
+    return (ch, 0.0, -sh), (-sh * sp, cp, -ch * sp), (sh * cp, sp, ch * cp)
+
+
+def matrices(atmosphere, size, near=NEAR, far=FAR):
+    """OpenGL view and projection matrices (row-major numpy float32; pass .T.tobytes() or
+    tobytes(order='F') to a mat4 uniform) that agree exactly with project() and the ray-marched sky.
+
+    Eye space looks down -z and clip w is the forward distance d used by the sky shader, so a sky hit
+    at forward distance d must write gl_FragDepth = 0.5 + 0.5 * (B - A * d) / d, A, B = depth_terms().
+    """
+    heading, pitch = view_angles(atmosphere)
+    right, up, forward = basis(heading, pitch)
+    eye = view_origin(atmosphere)
+    view = np.identity(4, dtype=np.float32)
+    view[0, :3], view[1, :3], view[2, :3] = right, up, [-c for c in forward]
+    view[:3, 3] = -view[:3, :3] @ np.array(eye, dtype=np.float32)
+    width, height = size
+    focal = 2.0 * SCREEN_SCALE
+    projection = np.zeros((4, 4), dtype=np.float32)
+    projection[0, 0] = focal * height / max(width, 1)
+    projection[1, 1] = focal
+    projection[2, 2], projection[2, 3] = depth_terms(near, far)
+    projection[3, 2] = -1.0
+    return view, projection
+
+
+def depth_terms(near=NEAR, far=FAR):
+    """(A, B) with clip z = A * eye_z + B, so at forward distance d (eye_z = -d) ndc_z = (B - A * d) / d."""
+    return -(far + near) / (far - near), -2.0 * far * near / (far - near)

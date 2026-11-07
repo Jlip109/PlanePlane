@@ -121,6 +121,10 @@ class Atmosphere:
         self.weather_label = 'SIMULATED WEATHER'
         self.boosting = False
         self.third_person = False
+        self.pilot_cam = False      # camera in front of the canopy, looking back at the pilot
+        self.emote = None           # key from emotes.EMOTES while the pilot is performing one
+        self.emote_time = 0.0       # atmosphere.elapsed when the emote started
+        self.pilot_avatar = 'pilot_male_01'  # people asset id of the selected pilot
         self.autopilot = False
         self.crashes = 0
         self.events = []
@@ -542,7 +546,7 @@ def main(argv=None):
     overlay = pygame.Surface(pygame.display.get_window_size(), pygame.SRCALPHA)
     captured = None
     shade_cache = [None, None]
-    presets = {pygame.K_1: 'clear', pygame.K_2: 'broken', pygame.K_3: 'overcast', pygame.K_4: 'storm'}
+    presets = {pygame.K_F1: 'clear', pygame.K_F2: 'broken', pygame.K_F3: 'overcast', pygame.K_F4: 'storm'}
     while running:
         dt = min(clock.tick(max(0, args.fps)) / 1000, 0.15)
         for event in pygame.event.get():
