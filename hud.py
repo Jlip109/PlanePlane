@@ -6,10 +6,11 @@ import pygame
 
 import ui
 import world
+from units import FEET_PER_METRE, MPH_PER_MPS
 
 CONTROLS = [
-    ('Flying', [('W  S', 'Climb / descend'), ('A  D', 'Turn'), ('SPACE', 'Boost'),
-                ('RIGHT MOUSE', 'Hold to look around'), ('↑  ↓', 'Look up / down'), ('R', 'Center view')]),
+    ('Flying', [('W  S', 'Climb / descend'), ('A  D', 'Turn'), ('SPACE', 'Boost toward Mach 1'),
+                ('V', 'Chase / cockpit view'), ('RIGHT MOUSE', 'Hold to look around'), ('↑  ↓', 'Look up / down'), ('R', 'Center view')]),
     ('World', [('1  2  3  4', 'Clear / broken / overcast / storm'), ('L', 'Live weather for your city'),
                ('←  →', 'Move the clock'), ('P', 'Pause the day cycle'), ('[  ]', 'Day cycle speed'),
                (',  .', 'Less / more wind'), ('G', 'Season')]),
@@ -24,7 +25,7 @@ class Hud:
         self.show_help = False
         self.banner = None
         self.flash = None
-        self.radar_range = 14000.0
+        self.radar_range = 8 * 1609.344
 
     def city_banner(self, index):
         self.banner = (index, 0.0)
@@ -45,10 +46,11 @@ class Hud:
     def draw(self, surface, atmosphere, game, fps, renderer):
         fonts = self.fonts
         target = game.mode.target() if game.mode else None
-        self.draw_reticle(surface)
+        if not atmosphere.third_person:
+            self.draw_reticle(surface)
         self.draw_heading_tape(surface, atmosphere, target)
         self.draw_location(surface, atmosphere)
-        self.draw_readouts(surface, atmosphere)
+        self.draw_readouts(surface, atmosphere, game.refueling)
         self.draw_radar(surface, atmosphere, target)
         if self.banner:
             self.draw_banner(surface)
@@ -116,19 +118,38 @@ class Hud:
         ui.text(surface, f'{weather}  ·  {clock}  ·  {SEASONS[atmosphere.ground_mode]}',
                 fonts.small, ui.TEXT, (24, 72), shadow=True)
 
-    def draw_readouts(self, surface, atmosphere):
+    def draw_readouts(self, surface, atmosphere, refueling=False):
         fonts = self.fonts
-        columns = [('Alt', f'{atmosphere.altitude:,.0f}', 'm'), ('Speed', f'{atmosphere.speed * 3.6:.0f}', 'km/h'),
-                   ('Climb', f'{atmosphere.vertical_speed:+.0f}', 'm/s')]
+        # Truncate so rounding can never announce Mach 1 early.
+        mach = math.floor(atmosphere.mach * 100) / 100
+        columns = [('Alt', f'{atmosphere.altitude * FEET_PER_METRE:,.0f}', 'ft'),
+                   ('Speed', f'{atmosphere.speed * MPH_PER_MPS:.0f}', 'mph'), ('Mach', f'{mach:.2f}', '')]
         x = 1256
         for name, value, unit in reversed(columns):
-            unit_rect = ui.text(surface, unit, fonts.small, ui.MUTED, (x, 52), 'bottomright', shadow=True)
-            value_rect = ui.text(surface, value, fonts.mono, ui.TEXT, (unit_rect.left - 6, 54), 'bottomright', shadow=True)
+            if unit:
+                unit_rect = ui.text(surface, unit, fonts.small, ui.MUTED, (x, 52), 'bottomright', shadow=True)
+                right = unit_rect.left - 6
+            else:
+                right = x
+            value_rect = ui.text(surface, value, fonts.mono, ui.TEXT, (right, 54), 'bottomright', shadow=True)
             ui.label(surface, name, fonts.tiny, (value_rect.left, 22), shadow=True)
             x = value_rect.left - 28
-        ui.label(surface, 'Boost', fonts.tiny, (1256 - 150, 66), shadow=True)
-        ui.bar(surface, (1256 - 150, 84, 150, 4), atmosphere.boost,
-               ui.ACCENT if atmosphere.boost > 0.25 or int(atmosphere.elapsed * 4) % 2 else ui.ALERT)
+        if atmosphere.speed >= atmosphere.MAX_SPEED:
+            state, color = 'MACH 1 - SPEED OF SOUND', ui.ACCENT
+        elif refueling:
+            state, color = 'Refueling', ui.GOOD
+        elif atmosphere.boosting:
+            state, color = 'Boost', ui.ACCENT
+        elif atmosphere.fuel <= 0:
+            state, color = 'Gliding', ui.ALERT
+        else:
+            state, color = 'Cruise', ui.MUTED
+        low = atmosphere.fuel < 15
+        ui.label(surface, 'Fuel', fonts.tiny, (1256 - 190, 66), shadow=True)
+        ui.label(surface, state, fonts.tiny, (1256, 66), color, 'topright', shadow=True)
+        ui.bar(surface, (1256 - 190, 84, 190, 4), atmosphere.fuel / 100,
+               ui.ALERT if low and int(atmosphere.elapsed * 4) % 2 else (ui.GOOD if refueling else ui.ACCENT))
+        ui.text(surface, f'{atmosphere.gallons:.1f} US gal', fonts.small, ui.MUTED, (1256, 92), 'topright', shadow=True)
 
     def draw_radar(self, surface, atmosphere, target):
         fonts = self.fonts
@@ -166,7 +187,7 @@ class Hud:
             pygame.draw.circle(surface, ui.ACCENT, pos, 6, 2)
         pygame.draw.polygon(surface, ui.TEXT, [(center[0], center[1] - 7), (center[0] - 5, center[1] + 5),
                                                (center[0], center[1] + 2), (center[0] + 5, center[1] + 5)])
-        ui.label(surface, f'{self.radar_range / 1000:.0f} km', fonts.tiny, (center[0], center[1] + radius + 6),
+        ui.label(surface, f'{self.radar_range / 1609.344:.0f} mi', fonts.tiny, (center[0], center[1] + radius + 6),
                  ui.DIM, 'midtop')
 
     def draw_banner(self, surface):

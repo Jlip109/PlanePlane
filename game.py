@@ -3,6 +3,8 @@
 States: title -> (pilots | controls) -> flying <-> paused -> results -> title
 """
 
+import math
+
 import numpy as np
 import pygame
 
@@ -16,6 +18,8 @@ from scores import Scores
 
 START = {'position': (0.0, -900.0), 'altitude': 700.0, 'heading': 0.0}
 MENU_STATES = ('title', 'pilots', 'controls')
+REFUEL_HEIGHT = 450.0  # fly this low (meters above the city) inside a city to refuel
+REFUEL_RATE = 14.0     # percent of the tank per second
 
 
 class Game:
@@ -35,6 +39,7 @@ class Game:
         self.state = 'title'
         self.quit_requested = False
         self.city = None
+        self.refueling = False
         if mode in self.modes:
             self.start(mode)
         else:
@@ -82,10 +87,10 @@ class Game:
         atmosphere.position = np.array(START['position'])
         atmosphere.altitude = START['altitude']
         atmosphere.heading = START['heading']
-        atmosphere.speed = 75.0 * atmosphere.speed_scale
-        atmosphere.vertical_speed = atmosphere.turn_rate = atmosphere.bank = atmosphere.flight_pitch = 0.0
+        atmosphere.speed = atmosphere.CRUISE_SPEED * atmosphere.speed_scale
+        atmosphere.vertical_speed = atmosphere.bank = atmosphere.flight_pitch = 0.0
         atmosphere.crash_timer = atmosphere.impact = 0.0
-        atmosphere.boost = 1.0
+        atmosphere.fuel = 100.0
         atmosphere.reset_view()
 
     def start(self, key):
@@ -156,8 +161,12 @@ class Game:
         self.radio.update(sim_dt)
         if self.audio:
             self.audio.update(dt, atmosphere, self.flying)
+        if self.state in MENU_STATES:
+            atmosphere.fuel = 100.0  # the title-screen autopilot never runs dry
         if self.state != 'flying' or not self.mode:
+            self.refueling = False
             return
+        self.refuel(sim_dt)
         for name, _ in atmosphere.events:
             if name == 'crash':
                 self.mode.on_crash(atmosphere)
@@ -170,6 +179,17 @@ class Game:
             self.state = 'results'
             self.radio.clear()
             self.sound('record' if self.mode.summary and self.mode.summary['record'] else 'deliver')
+
+    def refuel(self, dt):
+        """Every city has an airfield: fly low over it and the tank fills up."""
+        atmosphere = self.atmosphere
+        city = world.city_at(atmosphere.position[0], atmosphere.position[1])
+        low = city is not None and atmosphere.altitude < world.CITY_LEVELS[city] + REFUEL_HEIGHT
+        near = city is not None and math.hypot(atmosphere.position[0] - world.CITIES[city][1],
+                                               atmosphere.position[1] - world.CITIES[city][2]) < world.CITIES[city][3] * 0.75
+        self.refueling = bool(low and near and not atmosphere.crashed and atmosphere.fuel < 100)
+        if self.refueling:
+            atmosphere.fuel = min(100.0, atmosphere.fuel + REFUEL_RATE * dt)
 
     # ------------------------------------------------------------------ drawing
 

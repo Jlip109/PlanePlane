@@ -7,6 +7,8 @@ import math
 
 import pygame
 
+from units import FEET_PER_METRE
+
 WIDTH, HEIGHT = 1280, 720
 
 INK = (9, 18, 27)
@@ -209,4 +211,5 @@ def bearing(from_x, from_z, to_x, to_z):
 
 
 def format_distance(meters):
-    return f'{meters / 1000:.1f} km' if meters >= 1000 else f'{meters:.0f} m'
+    miles = meters / 1609.344
+    return f'{miles:.1f} mi' if miles >= 0.1 else f'{meters * FEET_PER_METRE:,.0f} ft'

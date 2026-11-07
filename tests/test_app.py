@@ -41,7 +41,7 @@ def test_cli_rejects_nan_without_traceback():
     ['--mode', 'menu'],
     ['--mode', 'free', '--preset', 'storm'],
     ['--mode', 'rings', '--hour', '23.5', '--preset', 'clear', '--ground', 'winter'],
-    ['--mode', 'courier', '--pilot', 'tailwind', '--ground', 'yellow'],
+    ['--mode', 'courier', '--pilot', 'tailwind', '--ground', 'yellow', '--camera', 'first'],
     ['--game', '--altitude', '99999', '--cover', '5', '--day-length', '0', '--hour', '-7'],
 ])
 def test_cpu_app_runs(extra, tmp_path):
@@ -62,8 +62,8 @@ def test_gpu_app_runs(mode, tmp_path):
         pytest.skip('no OpenGL 3.3 context available')
     assert result.returncode == 0, result.stderr
     assert 'disabled' not in result.stdout
-    image = pygame.image.load(str(shot))
-    assert pygame.transform.average_color(image)[:3] != (0, 0, 0)
+    pixels = pygame.surfarray.array3d(pygame.image.load(str(shot)))
+    assert pixels.mean() > 5 and pixels.std() > 5  # catches a colour mask left off by the aircraft depth pass
 
 
 def test_sanitize_restores_bad_values(atmosphere):
@@ -119,18 +119,21 @@ def test_flying_into_a_skyscraper_crashes(atmosphere):
     assert atmosphere.crashed
 
 
-def test_boost_drains_and_recharges(atmosphere, pg):
-    for _ in range(30):
-        atmosphere.update(0.1, Keys({pg.K_SPACE: 1}))
-    assert atmosphere.boost < 0.6 and atmosphere.speed > main.BASE_SPEED * 1.5
+def test_pilot_stats_shape_the_flight(atmosphere, pg):
+    atmosphere.speed_scale, atmosphere.handling = 1.2, 1.3
+    keys = Keys({pg.K_d: 1})
+    for _ in range(120):
+        atmosphere.update(1 / 30, keys)
+    assert atmosphere.speed == pytest.approx(atmosphere.CRUISE_SPEED * 1.2)
+    assert atmosphere.heading == pytest.approx((0.55 * 1.3 * 4 + math.pi) % math.tau - math.pi, abs=1e-6)
+
+
+def test_respawn_tops_up_the_tank(atmosphere):
+    atmosphere.fuel = 3.0
+    atmosphere.crash()
     for _ in range(40):
-        atmosphere.update(0.1, Keys({pg.K_SPACE: 1}))
-    assert atmosphere.boost_empty and not atmosphere.boosting
-    atmosphere.update(0.5, Keys({pg.K_SPACE: 1}))
-    assert not atmosphere.boosting  # no stutter while the tank refills
-    for _ in range(200):
         atmosphere.update(0.1, Keys())
-    assert atmosphere.boost == pytest.approx(1.0) and atmosphere.speed < main.BASE_SPEED * 1.05
+    assert not atmosphere.crashed and atmosphere.fuel >= 39
 
 
 @pytest.mark.parametrize('hour, preset, pitch, season', [
@@ -140,7 +143,6 @@ def test_cpu_render_is_valid(atmosphere, hour, preset, pitch, season):
     atmosphere.hour, atmosphere.pitch, atmosphere.ground_mode = hour, pitch, season
     main.apply_preset(atmosphere, preset)
     atmosphere.update_lighting()
-    atmosphere.camera = camera.compute_camera(atmosphere)
     image = atmosphere.render_array()
     assert image.shape == (main.Atmosphere.HEIGHT, main.Atmosphere.WIDTH, 3)
     assert np.all(np.isfinite(image)) and image.min() >= 0 and image.max() <= 255
@@ -150,7 +152,6 @@ def test_cpu_render_shows_a_city(atmosphere):
     atmosphere.position = np.array([0.0, 2400.0])
     atmosphere.altitude = 600.0
     atmosphere.pitch = -0.6
-    atmosphere.camera = camera.compute_camera(atmosphere)
     image = atmosphere.render_array()
     roofs = (image[..., 0] > image[..., 1] * 1.25) & (image[..., 0] > 90)  # Troy's brick-red roofs
     assert roofs.sum() > 50
@@ -166,7 +167,6 @@ def test_night_sky_has_stars(atmosphere):
 def test_project_matches_cpu_renderer_rays(atmosphere):
     atmosphere.heading, atmosphere.look_yaw, atmosphere.pitch = 0.7, 0.2, -0.3
     atmosphere.position = np.array([1500.0, -800.0])
-    atmosphere.camera = camera.compute_camera(atmosphere)
     width, height = 1280, 720
     atmosphere.aspect = width / height
     heading, pitch = view_angles(atmosphere)
@@ -191,7 +191,9 @@ def test_project_ignores_points_behind_camera(atmosphere):
 def test_camera_never_goes_underground(atmosphere):
     atmosphere.position = np.array([0.0, 3400.0])
     atmosphere.altitude = -500.0
-    assert camera.compute_camera(atmosphere)[1] >= world.obstacle_height(0.0, 3400.0) + 3
+    assert camera.view_origin(atmosphere)[1] >= world.obstacle_height(0.0, 3400.0) + 3
+    atmosphere.third_person = True
+    assert camera.view_origin(atmosphere)[1] >= world.obstacle_height(*camera.view_origin(atmosphere)[::2]) + 5
 
 
 def test_broken_system_is_disabled_not_fatal(capsys):

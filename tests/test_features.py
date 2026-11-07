@@ -207,7 +207,7 @@ def test_free_flight_greets_each_city_once(atmosphere, fake_game):
     fly_to(atmosphere, 0, 700, 3400, 0)
     free.update(0.1, atmosphere)
     later = [call[1] for call in fake_game.radio.queue]
-    assert sum('first time' in call for call in later) == 1 and 'meters per second' in later[-1]
+    assert sum('first time' in call for call in later) == 1 and 'miles per hour' in later[-1]
 
 
 # ------------------------------------------------------------------ the game director
@@ -311,8 +311,6 @@ def test_balloons_show_up_near_cities(atmosphere):
     balloon = life.balloons[0]
     x, y, z = balloon.position(0.0)
     fly_to(atmosphere, x, y, z - 400, 0)
-    import camera
-    atmosphere.camera = camera.compute_camera(atmosphere)
     atmosphere.cover = 0.0
     surface = pygame.Surface((1280, 720), pygame.SRCALPHA)
     life.draw_world(surface, atmosphere)

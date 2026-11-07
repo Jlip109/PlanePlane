@@ -9,6 +9,7 @@ import characters
 import ui
 import world
 from camera import SCREEN_SCALE, project
+from units import FEET_PER_METRE, MPH_PER_MPS
 
 
 def weather_words(atmosphere):
@@ -67,7 +68,7 @@ class FreeFlight(Mode):
     name = 'Free Flight'
     key = 'free'
     description = ('Fly anywhere. Six cities, dozens of villages, weather that changes by the minute. '
-                   'Every city’s tower will say hello the first time you arrive.')
+                   'Every city’s tower says hello the first time you arrive, and you can refuel at any of them.')
 
     def start(self, atmosphere):
         super().start(atmosphere)
@@ -78,7 +79,7 @@ class FreeFlight(Mode):
         nearest, distance = world.nearest_city(*atmosphere.position)
         name = world.CITIES[nearest][0]
         self.game.radio.say(characters.TOWERS[name], f'{greeting}, {callsign}. {name.title()} is '
-                                                     f'{distance / 1000:.0f} km out. W and S to climb and descend, A and D '
+                                                     f'{distance / 1609.344:.0f} miles out. W and S to climb and descend, A and D '
                                                      'to turn, Space to boost. Press H any time for the rest.')
 
     def update(self, dt, atmosphere):
@@ -97,8 +98,8 @@ class FreeFlight(Mode):
                     self.game.radio.say(tower, 'That’s all six cities. Every tower in the state knows your callsign now.')
                     self.game.sound('record')
             else:
-                self.game.radio.say(tower, f'{name.title()} here. Wind {atmosphere.wind:.0f} meters per second, '
-                                           f'{weather_words(atmosphere)}.')
+                self.game.radio.say(tower, f'{name.title()} here. Wind {atmosphere.wind * MPH_PER_MPS:.0f} miles per '
+                                           f'hour, {weather_words(atmosphere)}. Fly low over the city to refuel.')
         self.current_city = city
 
     def best_text(self):
@@ -282,8 +283,8 @@ class RingRun(Mode):
 class SkyCourier(Mode):
     name = 'Sky Courier'
     key = 'courier'
-    description = ('Five deliveries, six cities and a lot of people counting on you. Drop below 450 m over '
-                   'a city to pick up or deliver. Faster means bigger tips.')
+    description = ('Five deliveries, six cities and a lot of people counting on you. Drop below about 1,500 ft '
+                   'over a city to pick up or deliver. Faster means bigger tips.')
     JOBS = 5
     ZONE_HEIGHT = 450.0
     HOLD = 1.6
@@ -431,7 +432,8 @@ class SkyCourier(Mode):
                 fonts.small, ui.MUTED, (110, 212))
         inside, low = self.zone_progress(atmosphere, city_index)
         if inside and not low:
-            hint, color = f'Descend below {world.CITY_LEVELS[city_index] + self.ZONE_HEIGHT:.0f} m', ui.ACCENT
+            ceiling = (world.CITY_LEVELS[city_index] + self.ZONE_HEIGHT) * FEET_PER_METRE
+            hint, color = f'Descend below {ceiling:,.0f} ft', ui.ACCENT
         elif self.hold > 0:
             hint, color = 'Hold steady…', ui.GOOD
         elif pickup:

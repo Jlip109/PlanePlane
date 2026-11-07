@@ -6,7 +6,8 @@ import moderngl
 import numpy as np
 
 import world
-from camera import view_angles
+from camera import view_angles, view_origin
+from plane import plane_rotation
 
 
 VERTEX_SHADER = """
@@ -129,10 +130,12 @@ void main() {
     if (night_sky > 0.0) {
         float moon = smoothstep(cos(0.022), cos(0.017), dot(direction, moon_direction)) * night_sky * (1.0 - cover * 0.6);
         sky = mix(sky, vec3(226.0, 232.0, 240.0) / 255.0, moon);
-        vec2 cell = floor(vec2(atan(direction.z, direction.x), asin(clamp(direction.y, -1.0, 1.0))) * 180.0);
+        vec2 angular = vec2(atan(direction.z, direction.x), asin(clamp(direction.y, -1.0, 1.0))) * 180.0;
+        vec2 cell = floor(angular);
         float hashed = fract(sin(cell.x * 12.9898 + cell.y * 78.233) * 43758.5453);
         float twinkle = 0.75 + 0.25 * sin(time * 3.0 + hashed * 400.0);
-        sky += step(0.996, hashed) * smoothstep(0.0, 0.12, direction.y) * twinkle * night_sky
+        float spot = 1.0 - smoothstep(0.14, 0.27, length(fract(angular) - 0.5));
+        sky += step(0.996, hashed) * spot * smoothstep(0.0, 0.12, direction.y) * twinkle * night_sky
             * (1.0 - cover * 0.9) * 230.0 / 255.0;
     }
 
@@ -315,6 +318,47 @@ void main() {
 """
 
 
+PLANE_VERTEX_SHADER = """
+#version 330
+in vec3 in_position;
+in vec3 in_normal;
+in vec3 in_color;
+uniform mat3 rotation;
+uniform vec3 plane_center;
+uniform vec3 camera_origin;
+uniform vec2 camera_angles;
+uniform float aspect;
+out vec3 normal;
+out vec3 color;
+void main() {
+    vec3 p = rotation * in_position + plane_center - camera_origin;
+    float sh = sin(camera_angles.x), ch = cos(camera_angles.x);
+    float sp = sin(camera_angles.y), cp = cos(camera_angles.y);
+    float depth = p.x * sh * cp + p.y * sp + p.z * ch * cp;
+    float side = p.x * ch - p.z * sh;
+    float up = -p.x * sh * sp + p.y * cp - p.z * ch * sp;
+    // Perspective projection with a one-metre near plane and 20 km far plane.
+    gl_Position = vec4(side * 1.848888 / aspect, up * 1.848888,
+                       depth * 20001.0 / 19999.0 - 40000.0 / 19999.0, depth);
+    normal = rotation * in_normal;
+    color = in_color;
+}
+"""
+
+PLANE_FRAGMENT_SHADER = """
+#version 330
+in vec3 normal;
+in vec3 color;
+uniform vec3 sun_direction;
+out vec4 frag_color;
+void main() {
+    float daylight = smoothstep(-0.12, 0.35, sun_direction.y);
+    float light = 0.24 + daylight * (0.35 + 0.41 * max(0.0, dot(normalize(normal), sun_direction)));
+    frag_color = vec4(color * light, 1.0);
+}
+"""
+
+
 class GPURenderer:
     def __init__(self, pygame, offscreen=False):
         self.pg = pygame
@@ -340,6 +384,9 @@ class GPURenderer:
         self.scene_fbo = None
         self.slow_time = 0.0
         self.fast_time = 0.0
+        self.plane_program = None
+        self.plane_buffer = None
+        self.plane_vao = None
         assets = Path(__file__).parent / 'assets'
         self.cloud = self.load_texture(assets / 'Cloud.png')
         self.palette = self.load_texture(assets / 'skycolors.png')
@@ -347,6 +394,35 @@ class GPURenderer:
         self.program['sky_palette'] = 1
         self.hud_program['hud'] = 2
         self.hud_texture = None
+
+    def set_plane(self, plane):
+        self.plane_program = self.context.program(vertex_shader=PLANE_VERTEX_SHADER,
+                                                   fragment_shader=PLANE_FRAGMENT_SHADER)
+        data = np.concatenate((plane.positions, plane.normals, plane.colors), axis=1).astype('f4')
+        self.plane_buffer = self.context.buffer(data.tobytes())
+        self.plane_vao = self.context.vertex_array(
+            self.plane_program, [(self.plane_buffer, '3f 3f 3f', 'in_position', 'in_normal', 'in_color')])
+
+    def draw_plane(self, atmosphere, size):
+        if self.plane_vao is None or not atmosphere.third_person:
+            return
+        program = self.plane_program
+        program['rotation'].write(plane_rotation(atmosphere).tobytes(order='F'))
+        program['plane_center'] = (atmosphere.position[0], atmosphere.altitude, atmosphere.position[1])
+        program['camera_origin'] = view_origin(atmosphere)
+        program['camera_angles'] = view_angles(atmosphere)
+        program['aspect'] = size[0] / size[1]
+        program['sun_direction'] = tuple(atmosphere.sun_direction)
+        # Clear only depth, keeping the sky already rendered into the colour buffer.
+        target = self.target if self.offscreen and self.target is not None else self.context.screen
+        target.color_mask = (False, False, False, False)
+        target.clear(depth=1.0)
+        target.color_mask = (True, True, True, True)
+        target.use()
+        self.context.viewport = (0, 0, *size)
+        self.context.enable(moderngl.DEPTH_TEST)
+        self.plane_vao.render(moderngl.TRIANGLES)
+        self.context.disable(moderngl.DEPTH_TEST)
 
     def load_texture(self, path):
         surface = self.pg.image.load(path)  # main.Atmosphere already checked the assets exist
@@ -401,10 +477,12 @@ class GPURenderer:
             self.context.disable(moderngl.BLEND)
             self.scene_texture.use(3)
             self.scene_quad.render(moderngl.TRIANGLE_STRIP)
-            return
-        self.bind_target(size)
-        self.context.viewport = (0, 0, *size)
-        self.draw_sky(atmosphere, size)
+        else:
+            self.bind_target(size)
+            self.context.viewport = (0, 0, *size)
+            self.draw_sky(atmosphere, size)
+        # The aircraft always renders at full resolution, on top of the sky.
+        self.draw_plane(atmosphere, size)
 
     def draw_sky(self, atmosphere, size):
         self.context.disable(moderngl.BLEND)
@@ -461,6 +539,7 @@ class GPURenderer:
     def close(self):
         for resource in [self.quad, self.hud_quad, self.shade_quad, self.shade_program, self.scene_quad,
                          self.scene_program, self.scene_fbo, self.scene_texture, self.vertices, self.program, self.hud_program,
+                         self.plane_vao, self.plane_buffer, self.plane_program,
                          self.cloud, self.palette, self.hud_texture, self.target]:
             if resource is not None:
                 resource.release()

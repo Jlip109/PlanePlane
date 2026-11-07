@@ -10,7 +10,8 @@ import traceback
 import numpy as np
 
 import world
-from camera import compute_camera, view_angles
+from camera import view_angles, view_origin
+from units import FEET_PER_METRE
 
 DEFAULT_PITCH = 0.03
 PRESETS = {  # cover, wind, precipitation, storm
@@ -48,15 +49,18 @@ def star_field(dx, dy, dz, ray_length, night, cover, t):
     # Hash the ray direction into small angular cells; a few cells become stars.
     azimuth = np.arctan2(dz, dx)
     elevation = np.arcsin(np.clip(dy / ray_length, -1, 1))
-    cell_x, cell_y = np.floor(azimuth * 180), np.floor(elevation * 180)
+    angular = np.stack((azimuth, elevation), axis=-1) * 180
+    cell_x, cell_y = np.floor(angular[..., 0]), np.floor(angular[..., 1])
     hashed = np.mod(np.sin(cell_x * 12.9898 + cell_y * 78.233) * 43758.5453, 1)
     twinkle = 0.75 + 0.25 * np.sin(t * 3 + hashed * 400)
-    return (hashed > 0.996) * smoothstep(0.0, 0.12, dy / ray_length) * twinkle * night * (1 - cover * 0.9)
+    offset = np.mod(angular, 1) - 0.5
+    spot = 1 - smoothstep(0.14, 0.27, np.linalg.norm(offset, axis=-1))
+    return (hashed > 0.996) * spot * smoothstep(0.0, 0.12, dy / ray_length) * twinkle * night * (1 - cover * 0.9)
 
 
 CLOUD_LAYERS = [(850, 0.52, 0.85, 24), (1450, 0.43, 1.0, 97), (2150, 0.32, 1.23, 161), (3000, 0.20, 1.5, 233)]
-BASE_SPEED = 75.0
 MAX_ALTITUDE = 5500.0
+CLIMB_RATE = 430.0
 
 
 class NoKeys:
@@ -70,6 +74,9 @@ class Atmosphere:
     WIDTH = 320
     HEIGHT = 180
     FOCAL = WIDTH * 0.52
+    CRUISE_SPEED = 75.0
+    MAX_SPEED = 340.294  # Standard sea-level speed of sound at 59 degrees Fahrenheit, in m/s.
+    FUEL_CAPACITY_GALLONS = 20.0
 
     def __init__(self, pygame):
         self.pg = pygame
@@ -95,12 +102,11 @@ class Atmosphere:
         self.cover = 0.58
         self.wind = 12.0
         self.wind_angle = 0.6
-        self.speed = BASE_SPEED
+        self.speed = self.CRUISE_SPEED
+        self.fuel = 100.0
         self.vertical_speed = 0.0
-        self.turn_rate = 0.0
         self.bank = 0.0
         self.flight_pitch = 0.0
-        self.boost = 1.0
         self.impact = 0.0
         self.crash_timer = 0.0
         self.risk = 0.0
@@ -114,11 +120,10 @@ class Atmosphere:
         self.defaults = {name: value for name, value in vars(self).items() if isinstance(value, float)}
         self.weather_label = 'SIMULATED WEATHER'
         self.boosting = False
-        self.boost_empty = False
+        self.third_person = False
         self.autopilot = False
         self.crashes = 0
         self.events = []
-        self.camera = compute_camera(self)
 
     def emit(self, name, **data):
         self.events.append((name, data))
@@ -145,6 +150,18 @@ class Atmosphere:
     @property
     def crashed(self):
         return self.crash_timer > 0
+
+    @property
+    def camera(self):
+        return view_origin(self)
+
+    @property
+    def mach(self):
+        return self.speed / self.MAX_SPEED
+
+    @property
+    def gallons(self):
+        return self.fuel / 100 * self.FUEL_CAPACITY_GALLONS
 
     def update_lighting(self):
         self.hour %= 24
@@ -195,12 +212,16 @@ class Atmosphere:
                 + (self.texture[x, y1] * (1 - fx) + self.texture[x1, y1] * fx) * fy)
 
     def autopilot_keys(self):
-        """Gentle sightseeing circuit for the title screen."""
+        """Title-screen sightseeing: a slow circle around Troy, rising and falling over the rooftops."""
         pg = self.pg
-        target = 700 + 250 * math.sin(self.elapsed * 0.05)
-        keys = {pg.K_d: 1 if math.sin(self.elapsed * 0.03) > 0.2 else 0,
-                pg.K_w: 1 if self.altitude < target - 40 else 0,
-                pg.K_s: 1 if self.altitude > target + 40 else 0}
+        _, cx, cz, _, _, _ = world.CITIES[0]
+        dx, dz = self.position[0] - cx, self.position[1] - cz
+        orbit = math.atan2(dx, dz) + math.pi / 2 + float(np.clip((math.hypot(dx, dz) - 2600) / 2000, -0.6, 0.6))
+        turn = (orbit - self.heading + math.pi) % math.tau - math.pi
+        target = 650 + 220 * math.sin(self.elapsed * 0.05)
+        keys = {pg.K_d: 1 if turn > 0.05 else 0, pg.K_a: 1 if turn < -0.05 else 0,
+                pg.K_w: 1 if self.altitude < target - 30 else 0,
+                pg.K_s: 1 if self.altitude > target + 30 else 0}
         return lambda key: keys.get(key, 0)
 
     def update(self, dt, keys):
@@ -225,7 +246,6 @@ class Atmosphere:
         # An intentionally game-like exposure metric, not an aviation model.
         self.risk = float(np.clip(max(0, self.altitude - 1800) / 3700 * 68 + self.wind / 45 * 32, 0, 100))
         self.sanitize()
-        self.camera = compute_camera(self)
 
     def fly(self, dt, press):
         pg = self.pg
@@ -233,27 +253,24 @@ class Atmosphere:
             self.speed = 0.0
             self.vertical_speed = 0.0
             return
-        follow = min(1.0, dt * 3 * self.handling)
-        self.turn_rate += ((press(pg.K_d) - press(pg.K_a)) * 0.62 * self.handling - self.turn_rate) * follow
-        self.heading = (self.heading + self.turn_rate * dt + math.pi) % math.tau - math.pi
-        self.bank = self.turn_rate * 1.15
-        self.vertical_speed += ((press(pg.K_w) - press(pg.K_s)) * 190 - self.vertical_speed) * min(1.0, dt * 2.5)
-        # An empty tank has to refill a little before boost works again, so it doesn't stutter.
-        if self.boost <= 0.02:
-            self.boost_empty = True
-        elif self.boost >= 0.25:
-            self.boost_empty = False
-        self.boosting = bool(press(pg.K_SPACE)) and not self.boost_empty
-        if self.boosting:
-            self.boost = max(0.0, self.boost - dt * 0.22 / self.boost_scale)
-        else:
-            self.boost = min(1.0, self.boost + dt * 0.09)
-        target_speed = BASE_SPEED * self.speed_scale * (2.0 if self.boosting else 1.0)
-        self.speed += (target_speed - self.speed) * min(1.0, dt * 1.5)
-        self.flight_pitch = math.atan2(self.vertical_speed, max(self.speed, 1.0))
-        self.altitude += self.vertical_speed * dt
-        if self.altitude > MAX_ALTITUDE:
-            self.altitude, self.vertical_speed = MAX_ALTITUDE, min(self.vertical_speed, 0.0)
+        # Boost pushes toward Mach 1 and burns fuel; the faster you go, the less the controls bite.
+        cruise = self.CRUISE_SPEED * self.speed_scale
+        self.boosting = bool(press(pg.K_SPACE) and self.fuel > 0)
+        target_speed = self.MAX_SPEED if self.boosting else (cruise if self.fuel > 0 else 45.0)
+        acceleration = 35.0 if self.boosting else 25.0
+        self.speed += float(np.clip(target_speed - self.speed, -acceleration * dt, acceleration * dt))
+        self.speed = float(np.clip(self.speed, 0, self.MAX_SPEED))
+        fast = max(float(self.boosting), float(np.clip((self.speed - cruise) / (self.MAX_SPEED - cruise), 0, 1)))
+        control = 1 - fast * 0.55
+        turn = press(pg.K_d) - press(pg.K_a)
+        climb = (press(pg.K_w) - press(pg.K_s)) * control if self.fuel > 0 else -0.025
+        self.heading = (self.heading + turn * dt * 0.55 * control * self.handling + math.pi) % math.tau - math.pi
+        self.bank += (-turn * 0.40 * control - self.bank) * (1 - math.exp(-dt * 5))
+        self.flight_pitch += (climb * 0.30 - self.flight_pitch) * (1 - math.exp(-dt * 3))
+        burn = 0.08 + 0.48 * self.boosting / self.boost_scale + max(0, climb) * 0.06
+        self.fuel = max(0.0, self.fuel - burn * dt)
+        self.vertical_speed = climb * CLIMB_RATE
+        self.altitude = min(self.altitude + self.vertical_speed * dt, MAX_ALTITUDE)
         self.position += np.array([math.sin(self.heading), math.cos(self.heading)]) * self.speed * dt
         floor = world.obstacle_height(self.position[0], self.position[1])
         if self.altitude < floor + 1.5:
@@ -272,8 +289,9 @@ class Atmosphere:
         self.crash_timer = 0.0
         floor = world.obstacle_height(self.position[0], self.position[1])
         self.altitude = min(MAX_ALTITUDE, max(self.altitude, floor) + 300)
-        self.vertical_speed = self.turn_rate = self.bank = self.flight_pitch = 0.0
-        self.speed = BASE_SPEED * self.speed_scale
+        self.vertical_speed = self.bank = self.flight_pitch = 0.0
+        self.speed = self.CRUISE_SPEED * self.speed_scale
+        self.fuel = max(self.fuel, 40.0)  # the recovery crew tops you up
         self.emit('respawn')
 
     def render(self):
@@ -429,7 +447,8 @@ def parse_args(argv=None):
     parser.add_argument('--fullscreen', action='store_true')
     parser.add_argument('--mute', action='store_true')
     parser.add_argument('--screenshot', type=Path)
-    parser.add_argument('--altitude', type=finite, default=None)
+    parser.add_argument('--altitude', type=finite, default=None, help='Starting altitude in feet')
+    parser.add_argument('--camera', choices=['third', 'first'], default='third', help='Starting camera view')
     parser.add_argument('--time', type=finite, default=None, help='Legacy palette position, 0 day to 1 night')
     parser.add_argument('--hour', type=finite, default=9.0, help='Starting hour in the 24-hour cycle')
     parser.add_argument('--day-length', type=finite, default=240.0, help='Real seconds per simulated 24 hours')
@@ -458,6 +477,7 @@ def open_window(pygame, args):
             pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
             pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 3)
             pygame.display.gl_set_attribute(pygame.GL_CONTEXT_PROFILE_MASK, pygame.GL_CONTEXT_PROFILE_CORE)
+            pygame.display.gl_set_attribute(pygame.GL_DEPTH_SIZE, 24)
             flags = pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE
             if args.headless:
                 flags |= pygame.HIDDEN
@@ -493,6 +513,7 @@ def main(argv=None):
     window = pygame.display.get_surface()
     fonts = Fonts()
     atmosphere = Atmosphere(pygame)
+    atmosphere.third_person = args.camera == 'third'
     atmosphere.hour = args.hour % 24
     if args.time is not None:
         atmosphere.hour = (12 + float(np.clip(args.time, 0, 1)) * 12) % 24
@@ -505,8 +526,12 @@ def main(argv=None):
     audio = Audio(pygame, enabled=not args.headless and not args.mute)
     game = Game(atmosphere, fonts, audio, args.mode, args.pilot, args.seed)
     if args.altitude is not None:
-        atmosphere.altitude = float(np.clip(args.altitude, 180, MAX_ALTITUDE))
+        atmosphere.altitude = float(np.clip(args.altitude / FEET_PER_METRE, 180, MAX_ALTITUDE))
     systems = build_systems(args)
+    from plane import PlaneModel
+    plane = PlaneModel()
+    if gpu:
+        gpu.set_plane(plane)
     clock = pygame.time.Clock()
     running, frames = True, 0
     start = time.perf_counter()
@@ -531,6 +556,8 @@ def main(argv=None):
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_r:
                         atmosphere.reset_view()
+                    elif event.key == pygame.K_v:
+                        atmosphere.third_person = not atmosphere.third_person
                     elif event.key == pygame.K_g:
                         atmosphere.ground_mode = (atmosphere.ground_mode + 1) % 3
                     elif event.key == pygame.K_p:
@@ -578,6 +605,7 @@ def main(argv=None):
                 window = pygame.display.get_surface()
                 view = atmosphere.render()
                 pygame.transform.smoothscale(view, (width, height), window)
+                plane.draw_world(window, atmosphere)
                 key = ((width, height), shade)
                 if shade_cache[0] != key:
                     shade_cache[:] = [key, ui.scene_shade((width, height), *shade)]
