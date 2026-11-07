@@ -6,6 +6,7 @@ import ui
 
 TITLE_ITEMS = [('free', 'Free Roam'), ('rings', 'Ring Mode'), ('aircraft', 'Aircraft'), ('quit', 'Quit')]
 VISIBLE_TITLE_ITEMS = TITLE_ITEMS
+ONLINE_TITLE_ITEMS = TITLE_ITEMS[:2] + [('race', 'Ring Race')] + TITLE_ITEMS[2:]
 PAUSE_ITEMS = [('resume', 'Resume'), ('restart', 'Restart'), ('title', 'Main Menu'),
                ('frame_limit', 'Frame cap'), ('quit', 'Quit Game')]
 CONFIRM = (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE)
@@ -26,6 +27,9 @@ class Menu:
 
     def update(self, dt):
         self.age += dt
+
+    def title_items(self):
+        return ONLINE_TITLE_ITEMS if 'race' in self.game.modes else VISIBLE_TITLE_ITEMS
 
     def to_hud(self, pos):
         scale, ox, oy = self.game.hud_transform
@@ -65,14 +69,14 @@ class Menu:
             return None
         key = event.key
         if state == 'title' and key in (pygame.K_LEFT,pygame.K_RIGHT):
-            if VISIBLE_TITLE_ITEMS[self.title_index][0] == 'aircraft':
+            if self.title_items()[self.title_index][0] == 'aircraft':
                 return 'aircraft'
         if state == 'paused' and key in (pygame.K_LEFT, pygame.K_RIGHT):
             if PAUSE_ITEMS[self.pause_index][0] == 'frame_limit':
                 return 'fps_down' if key == pygame.K_LEFT else 'fps_up'
         if state == 'title':
             if key in UP or key in DOWN:
-                self.title_index = (self.title_index + (1 if key in DOWN else -1)) % len(VISIBLE_TITLE_ITEMS)
+                self.title_index = (self.title_index + (1 if key in DOWN else -1)) % len(self.title_items())
                 self.game.sound('tick')
             elif key in CONFIRM:
                 return self.confirm(state)
@@ -105,7 +109,7 @@ class Menu:
     def confirm(self, state):
         self.game.sound('select')
         if state == 'title':
-            return VISIBLE_TITLE_ITEMS[self.title_index][0]
+            return self.title_items()[self.title_index][0]
         if state == 'paused':
             return PAUSE_ITEMS[self.pause_index][0]
         if state == 'results':
@@ -132,7 +136,7 @@ class Menu:
         ui.text(surface, 'PLANE²', fonts.display, ui.TEXT, (x - 4, 128), tracking=6, alpha=255 * intro)
         ui.text(surface, 'A flight through a living sky.', fonts.body, ui.MUTED, (x, 236), alpha=255 * intro)
         y = 300
-        for index, (key, name) in enumerate(VISIBLE_TITLE_ITEMS):
+        for index, (key, name) in enumerate(self.title_items()):
             if key == 'aircraft':
                 from plane import PLANE_MODELS
                 name += '  ' + PLANE_MODELS[self.game.atmosphere.plane_id][0]
@@ -142,7 +146,7 @@ class Menu:
                 pygame.draw.rect(surface, ui.ACCENT, (x - 20, y + 5, 4, 22), border_radius=2)
             self.hit_areas.append((index, pygame.Rect(x - 24, y - 6, 300, 40), 'title'))
             y += 44
-        self.draw_title_card(surface, VISIBLE_TITLE_ITEMS[self.title_index][0])
+        self.draw_title_card(surface, self.title_items()[self.title_index][0])
         ui.hint_row(surface, [('↑ ↓', 'Select'), ('ENTER', 'Start'), ('ESC', 'Quit')], fonts, (x, 690))
 
     def draw_title_card(self, surface, key):

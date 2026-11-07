@@ -9,7 +9,7 @@ import math
 
 from hud import Hud
 from menu import Menu
-from modes import FreeFlight, RingRun
+from modes import FreeFlight, RaceMode, RingRun
 from scores import Scores
 from plane import PLANE_MODELS
 
@@ -18,7 +18,7 @@ MENU_STATES = ('title',)
 
 
 class Game:
-    def __init__(self, atmosphere, fonts, audio, mode='menu', seed=None, scores=None):
+    def __init__(self, atmosphere, fonts, audio, mode='menu', seed=None, scores=None, network=None):
         self.atmosphere = atmosphere
         self.fonts = fonts
         self.audio = audio
@@ -38,13 +38,26 @@ class Game:
         self.quit_requested = False
         self.refueling = False
         self.frame_limit = 60
-        self.network = None
+        self.network = network
         if mode in self.modes:
             self.start(mode)
         else:
             atmosphere.autopilot = True
 
     # ------------------------------------------------------------------ helpers
+
+    @property
+    def network(self):
+        return self._network
+
+    @network.setter
+    def network(self, client):
+        # The online Ring Race only exists while connected to a server.
+        self._network = client
+        if client is not None and 'race' not in self.modes:
+            self.modes['race'] = RaceMode(self)
+        elif client is None:
+            self.modes.pop('race', None)
 
     @property
     def flying(self):

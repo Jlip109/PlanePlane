@@ -169,3 +169,75 @@ class Hud:
         surface.blit(tint, (0, 0))
         ui.text(surface, 'CRASHED', fonts.h1, ui.TEXT, (640, 300), 'midtop', tracking=10, shadow=True)
         ui.text(surface, 'Recovering altitude…', fonts.body, ui.TEXT, (640, 352), 'midtop', shadow=True)
+
+
+PILOT_COLOR = (90, 210, 245)
+
+
+def marker(atmosphere, point, size, margin=40):
+    """Where to mark a world point on a window of this size, using the shared camera:
+    ('tag', x, y) when it is on screen, else ('edge', x, y, angle) for an arrow on the screen edge."""
+    from camera import SCREEN_SCALE, basis, view_angles, view_origin
+    right, up, forward = basis(*view_angles(atmosphere))
+    relative = [p - o for p, o in zip(point, view_origin(atmosphere))]
+    side, rise, depth = (sum(a * b for a, b in zip(relative, axis)) for axis in (right, up, forward))
+    width, height = size
+    if depth > 1:
+        focal = height * SCREEN_SCALE
+        x, y = width / 2 + side / depth * focal, height / 2 - rise / depth * focal
+        if margin <= x <= width - margin and margin <= y <= height - margin:
+            return 'tag', x, y
+        dx, dy = x - width / 2, y - height / 2
+    else:
+        # Behind the camera: point the way you would turn to face it.
+        dx, dy = side, -rise
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            dx, dy = 0.0, 1.0
+    stretch = min((width / 2 - margin) / max(abs(dx), 1e-9), (height / 2 - margin) / max(abs(dy), 1e-9))
+    return 'edge', width / 2 + dx * stretch, height / 2 + dy * stretch, math.atan2(dy, dx)
+
+
+class PilotMarkers:
+    """Name tags over other pilots and edge-of-screen arrows toward the ones out of view.
+
+    A main-loop system: draw_world() paints the window-sized overlay that both renderers composite."""
+
+    def __init__(self, game):
+        self.game = game
+
+    def places(self):
+        network = self.game.network
+        info = network.race_state() if network else None
+        if not info or info['phase'] == 'waiting':
+            return {}
+        return {entry['id']: entry['place'] for entry in info['standings']}
+
+    def draw_world(self, surface, atmosphere):
+        if self.game.state not in ('flying', 'paused', 'results') or not atmosphere.remote_players:
+            return
+        from race import ordinal
+        fonts = self.game.fonts
+        places = self.places()
+        size = surface.get_size()
+        eye = atmosphere.camera
+        for player in atmosphere.remote_players:
+            point = (player['x'], player['y'] + 7, player['z'])
+            distance = math.dist(eye, point)
+            name = player['name']
+            if player['id'] in places:
+                name = f'{ordinal(places[player["id"]])}  {name}'
+            where = marker(atmosphere, point, size)
+            reach = ui.format_distance(distance)
+            if where[0] == 'tag':
+                _, x, y = where
+                pygame.draw.polygon(surface, PILOT_COLOR, [(x, y - 4), (x - 7, y - 14), (x + 7, y - 14)])
+                ui.text(surface, name, fonts.small, ui.TEXT, (x, y - 18), 'midbottom', shadow=True)
+                ui.text(surface, reach, fonts.tiny, PILOT_COLOR, (x, y - 36), 'midbottom', shadow=True)
+            else:
+                _, x, y, angle = where
+                c, s = math.cos(angle), math.sin(angle)
+                tip = (x + c * 16, y + s * 16)
+                pygame.draw.polygon(surface, PILOT_COLOR, [tip, (x - s * 10, y + c * 10), (x + s * 10, y - c * 10)])
+                lx, ly = x - c * 26, y - s * 26
+                ui.text(surface, name, fonts.tiny, ui.TEXT, (lx, ly - 8), 'center', shadow=True)
+                ui.text(surface, reach, fonts.tiny, PILOT_COLOR, (lx, ly + 8), 'center', shadow=True)

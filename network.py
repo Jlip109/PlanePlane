@@ -11,9 +11,11 @@ import time
 import uuid
 
 from plane import PLANE_MODELS
+import race
 from units import MAX_FLIGHT_SPEED_MPS
 
-VERSION = 1
+VERSION = 2
+SUPPORTED_VERSIONS = (1, 2)  # version 1 clients still fly together; they just never race
 TICK_RATE = 20
 MAX_LINE = 262144
 STATE_FIELDS = ('x','y','z','heading','bank','flight_pitch','speed','fuel')
@@ -39,14 +41,69 @@ def clean_state(message):
     result['heading'] = (result['heading']+math.pi) % math.tau-math.pi
     result['bank'] = min(math.pi,max(-math.pi,result['bank']))
     result['flight_pitch'] = min(1.5,max(-1.5,result['flight_pitch']))
+    # Optional race progress (protocol 2). Absent fields mean "not racing".
+    racing = message.get('racing',False)
+    if not isinstance(racing,bool):
+        raise ValueError('Invalid racing flag')
+    result['racing'] = racing
+    for name,limit in (('round',2**31),('gates',race.GATES)):
+        value = message.get(name,0)
+        if isinstance(value,bool) or not isinstance(value,int) or not 0 <= value <= limit:
+            raise ValueError(f'Invalid {name}')
+        result[name] = value
+    finish = message.get('finish')
+    if finish is not None and (isinstance(finish,bool) or not isinstance(finish,(float,int))
+                               or not math.isfinite(finish) or not 0 <= finish <= 3600):
+        raise ValueError('Invalid finish time')
+    result['finish'] = None if finish is None else float(finish)
+    return result
+
+
+def clean_race(info):
+    """Validate the race block a server sends with each snapshot."""
+    if not isinstance(info,dict) or info.get('phase') not in race.PHASES:
+        raise ValueError('Invalid race state')
+    result = {'phase': info['phase']}
+    for name in ('round','seed','gates'):
+        value = info.get(name)
+        if isinstance(value,bool) or not isinstance(value,int) or not 0 <= value <= 2**31:
+            raise ValueError(f'Invalid race {name}')
+        result[name] = value
+    if result['gates'] > race.GATES:
+        raise ValueError('Invalid race gates')
+    for name in ('start','ends'):
+        value = info.get(name)
+        if isinstance(value,bool) or not isinstance(value,(float,int)) or not math.isfinite(value):
+            raise ValueError(f'Invalid race {name}')
+        result[name] = float(value)
+    standings = info.get('standings',[])
+    if not isinstance(standings,list) or len(standings) > 100:
+        raise ValueError('Invalid standings')
+    result['standings'] = []
+    for entry in standings:
+        if not isinstance(entry,dict) or entry.get('status') not in ('racing','finished','dnf'):
+            raise ValueError('Invalid standing')
+        clean = {'id': str(entry.get('id',''))[:24], 'name': str(entry.get('name',''))[:24], 'status': entry['status']}
+        for name,limit in (('place',100),('gates',race.GATES),('slot',100)):
+            value = entry.get(name)
+            if isinstance(value,bool) or not isinstance(value,int) or not 0 <= value <= limit:
+                raise ValueError(f'Invalid standing {name}')
+            clean[name] = value
+        for name in ('finish','gap'):
+            value = entry.get(name)
+            if value is not None and (isinstance(value,bool) or not isinstance(value,(float,int)) or not math.isfinite(value)):
+                raise ValueError(f'Invalid standing {name}')
+            clean[name] = None if value is None else float(value)
+        result['standings'].append(clean)
     return result
 
 
 class RoomServer:
-    def __init__(self, seed=1, max_players=100):
+    def __init__(self, seed=1, max_players=100, **race_options):
         self.seed = seed
         self.max_players = min(100,max(1,max_players))
         self.peers = {}
+        self.race = race.RaceDirector(seed,**race_options)
         self.server = None
         self.broadcast_task = None
         self.started = time.monotonic()
@@ -84,7 +141,7 @@ class RoomServer:
         try:
             raw = await asyncio.wait_for(reader.readline(),5)
             hello = json.loads(raw)
-            if not isinstance(hello,dict) or hello.get('version') != VERSION or hello.get('type') != 'join':
+            if not isinstance(hello,dict) or hello.get('version') not in SUPPORTED_VERSIONS or hello.get('type') != 'join':
                 raise ValueError('Protocol version mismatch')
             if len(self.peers) >= self.max_players:
                 raise ValueError('Room is full')
@@ -93,17 +150,20 @@ class RoomServer:
             model = hello.get('model','classic')
             if not isinstance(model,str) or model not in PLANE_MODELS:
                 raise ValueError('Unknown aircraft')
-            spawn = {'x': (len(self.peers)%10)*24.0, 'y': 700.0, 'z': -900.0+(len(self.peers)//10)*40}
-            state = dict(spawn,heading=0.,bank=0.,flight_pitch=0.,speed=75.,fuel=100.,model=model)
+            spawn = self.spawn_point()
+            state = dict(clean_state(dict(spawn,bank=0.,flight_pitch=0.,speed=75.,fuel=100.,model=model)))
             self.peers[player_id] = {'writer':writer,'name':name,'state':state}
             hour = (9+(time.monotonic()-self.started)*.1) % 24
-            writer.write(encode({'type':'welcome','version':VERSION,'id':player_id,'seed':self.seed,'spawn':spawn,'hour':hour}))
+            writer.write(encode({'type':'welcome','version':hello['version'],'id':player_id,'seed':self.seed,
+                                 'spawn':spawn,'hour':hour,'time':time.monotonic()}))
             await writer.drain()
             while raw := await asyncio.wait_for(reader.readline(),30):
                 message = json.loads(raw)
                 if not isinstance(message,dict) or message.get('type') != 'state':
                     raise ValueError('Expected state update')
-                self.peers[player_id]['state'] = clean_state(message)
+                state = clean_state(message)
+                self.peers[player_id]['state'] = state
+                self.race.report(player_id,state,time.monotonic())
         except (ValueError, OSError, asyncio.TimeoutError, ConnectionError) as error:
             if not writer.is_closing():
                 try:
@@ -113,16 +173,37 @@ class RoomServer:
         finally:
             if player_id:
                 self.peers.pop(player_id,None)
+                self.race.remove(player_id)
             writer.close()
             try:
                 await writer.wait_closed()
             except OSError:
                 pass
 
+    def spawn_point(self):
+        """Join just behind and beside the room's longest-flying pilot, facing the same way, so you see them."""
+        if not self.peers:
+            return {'x':0.0,'y':700.0,'z':-900.0,'heading':0.0}
+        anchor = next(iter(self.peers.values()))['state']
+        count = len(self.peers)
+        side = (40.0+(count//2 % 4)*30.0)*(1 if count % 2 else -1)
+        sh,ch = math.sin(anchor['heading']),math.cos(anchor['heading'])
+        x = anchor['x']-sh*160+ch*side
+        z = anchor['z']-ch*160-sh*side
+        y = min(5400.0,max(anchor['y'],race.world.obstacle_height(x,z)+250))
+        return {'x':x,'y':y,'z':z,'heading':anchor['heading']}
+
+    def tick_race(self):
+        now = time.monotonic()
+        self.race.tick(now,{player_id:(peer['name'],peer['state'].get('racing',False))
+                            for player_id,peer in self.peers.items()})
+        return now
+
     async def broadcast(self):
         while True:
+            now = self.tick_race()
             players = [dict(peer['state'],id=player_id,name=peer['name']) for player_id,peer in self.peers.items()]
-            packet = encode({'type':'snapshot','players':players})
+            packet = encode({'type':'snapshot','players':players,'time':now,'race':self.race.snapshot(now)})
             for peer in list(self.peers.values()):
                 writer = peer['writer']
                 if writer.is_closing():
@@ -258,6 +339,9 @@ class NetworkClient:
         self.lock = threading.Lock()
         self.state = None
         self.snapshots = deque(maxlen=8)
+        self.race = None
+        self.clock_offset = None
+        self.sync_clock(self.welcome.get('time'))
         self.status = 'Connected'
         self.stop = threading.Event()
         self.socket.settimeout(.25)
@@ -289,6 +373,9 @@ class NetworkClient:
         self.lock = threading.Lock()
         self.state = None
         self.snapshots = deque(maxlen=8)
+        self.race = None
+        self.clock_offset = None
+        self.sync_clock(self.welcome.get('time'))
         self.status = 'Connected'
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.run_websocket,name='PlanePlane network',daemon=True)
@@ -324,16 +411,38 @@ class NetworkClient:
             for item in message['players']:
                 state = clean_state(item)
                 players[str(item['id'])] = dict(state,id=str(item['id']),name=str(item['name'])[:24])
+            race_info = clean_race(message['race']) if 'race' in message else None
             with self.lock:
                 self.snapshots.append((time.monotonic(),players))
+                if race_info is not None:
+                    self.race = race_info
+            self.sync_clock(message.get('time'))
         elif message.get('type') == 'error':
             raise ValueError(message.get('message','Server error'))
 
-    def publish(self, atmosphere):
+    def sync_clock(self, server_time):
+        """Track server clock - local clock. Delivery delay only ever makes a sample smaller, so keep the largest."""
+        if isinstance(server_time,bool) or not isinstance(server_time,(float,int)) or not math.isfinite(server_time):
+            return
+        sample = server_time-time.monotonic()
+        if self.clock_offset is None or sample > self.clock_offset:
+            self.clock_offset = sample
+
+    def server_time(self):
+        return time.monotonic()+(self.clock_offset or 0.0)
+
+    def race_state(self):
+        with self.lock:
+            return self.race
+
+    def publish(self, atmosphere, progress=None):
         state = {'type':'state','x':float(atmosphere.position[0]),'y':atmosphere.altitude,
                  'z':float(atmosphere.position[1]),'heading':atmosphere.heading,'bank':atmosphere.bank,
                  'flight_pitch':atmosphere.flight_pitch,'speed':atmosphere.speed,'fuel':atmosphere.fuel,
                  'model':atmosphere.plane_id}
+        if progress:
+            state.update(racing=True,round=int(progress['round']),gates=int(progress['gates']),
+                         finish=progress['finish'])
         with self.lock:
             self.state = state
 

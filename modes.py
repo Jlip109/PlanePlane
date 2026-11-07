@@ -5,6 +5,7 @@ import math
 import numpy as np
 import pygame
 
+import race
 import ui
 import world
 from camera import SCREEN_SCALE, project, project_polygon, view_origin
@@ -49,6 +50,10 @@ class Mode:
 
     def best_text(self):
         return ''
+
+    def progress(self):
+        """Race progress to report to the server, or None when this mode is not racing."""
+        return None
 
 
 class FreeFlight(Mode):
@@ -107,18 +112,9 @@ class RingRun(Mode):
         self.previous_position = plane_point(atmosphere)
 
     def add_ring(self, first=False):
-        x, y, z, heading = self.cursor
-        if not first:
-            heading += self.rng.uniform(-0.4, 0.4)
-            y += self.rng.uniform(-130, 130)
-        x += math.sin(heading) * self.SPACING
-        z += math.cos(heading) * self.SPACING
-        # Keep every gate above the highest terrain under its opening.
-        reach = range(-112, 113, 28)
-        clearance = max(world.obstacle_height(x + dx, z + dz) for dx in reach for dz in reach) + self.RADIUS + 40
-        y = float(np.clip(y, max(clearance, 300), 2600))
-        self.cursor = (x, y, z, heading)
-        self.rings.append((x, y, z, math.sin(heading), math.cos(heading)))
+        # Shared with the multiplayer race so both build courses the same way.
+        self.cursor, ring = race.next_gate(self.cursor, self.rng, first)
+        self.rings.append(ring)
 
     def ring_side(self, atmosphere, ring):
         x, _, z, nx, nz = ring
@@ -138,16 +134,7 @@ class RingRun(Mode):
         ring = self.rings[0]
         side = self.ring_side(atmosphere, ring)
         if self.side < 0 <= side:
-            x, y, z, nx, nz = ring
-            fraction = -self.side / (side - self.side)
-            current = np.array(plane_point(atmosphere))
-            crossing = np.array(self.previous_position) + fraction * (current - self.previous_position)
-            horizontal = (crossing[0] - x) * nz - (crossing[2] - z) * nx
-            vertical = crossing[1] - y
-            apothem = (self.RADIUS - 3) * math.cos(math.pi / 10)
-            inside = all(horizontal * math.cos((i + 0.5) * math.tau / 10 + self.gate_rotation(ring))
-                         + vertical * math.sin((i + 0.5) * math.tau / 10 + self.gate_rotation(ring)) <= apothem for i in range(10))
-            if inside:
+            if self.through_gate(atmosphere, ring, side):
                 self.score += 100 * self.combo
                 self.passed += 1
                 self.time_left += self.BONUS
@@ -166,6 +153,18 @@ class RingRun(Mode):
         self.previous_position = plane_point(atmosphere)
         if self.time_left <= 0:
             self.finish()
+
+    def through_gate(self, atmosphere, ring, side):
+        """After the plane crossed a gate's plane this frame: did it pass inside the opening?"""
+        x, y, z, nx, nz = ring
+        fraction = -self.side / (side - self.side)
+        current = np.array(plane_point(atmosphere))
+        crossing = np.array(self.previous_position) + fraction * (current - self.previous_position)
+        horizontal = (crossing[0] - x) * nz - (crossing[2] - z) * nx
+        vertical = crossing[1] - y
+        apothem = (self.RADIUS - 3) * math.cos(math.pi / 10)
+        return all(horizontal * math.cos((i + 0.5) * math.tau / 10 + self.gate_rotation(ring))
+                   + vertical * math.sin((i + 0.5) * math.tau / 10 + self.gate_rotation(ring)) <= apothem for i in range(10))
 
     def on_crash(self, atmosphere):
         if self.active:
@@ -243,3 +242,231 @@ class RingRun(Mode):
     def best_text(self):
         best = self.game.scores.get('ring_best')
         return f'Best score  {best:,}' if best else 'No runs yet'
+
+
+def race_clock(seconds):
+    seconds = max(0.0, seconds)
+    return f'{int(seconds // 60)}:{seconds % 60:04.1f}'
+
+
+class RaceMode(RingRun):
+    """Online Ring Race: the server runs the rounds, every client flies the same seeded course."""
+    name = 'Ring Race'
+    key = 'race'
+    description = ('Race everyone in the room through the same gold gates. Rounds start on a shared '
+                   'countdown; miss a gate and you must turn back for it. First through them all wins.')
+    UNCONFIRMED = 2.5  # seconds the server may lag behind a local gate pass before we roll back
+
+    def __init__(self, game):
+        super().__init__(game, 0)
+        self.info = None
+        self.me = None
+        self.round = None
+        self.course = []
+
+    def start(self, atmosphere):
+        Mode.start(self, atmosphere)
+        self.active = True
+        self.score, self.passed, self.combo, self.best_combo = 0, 0, 1, 1
+        self.time_left = 0.0
+        self.info, self.me, self.round = None, None, None
+        self.course, self.rings = [], []
+        self.finish_time = None
+        self.clock = 0.0
+        self.unconfirmed = 0.0
+        self.side = -1.0
+        self.previous_position = plane_point(atmosphere)
+
+    @property
+    def phase(self):
+        return self.info['phase'] if self.info else 'connecting'
+
+    def load_round(self, info, atmosphere):
+        self.round = info['round']
+        self.course = race.course(info['seed'], info['gates'])
+        self.passed = 0
+        self.finish_time = None
+        self.unconfirmed = 0.0
+        self.side = self.ring_side(atmosphere, self.course[0]) if self.course else -1.0
+
+    def update(self, dt, atmosphere):
+        Mode.update(self, dt, atmosphere)
+        network = self.game.network
+        self.info = info = network.race_state() if network else None
+        if info is None:
+            self.me, self.rings = None, []
+            return
+        phase = info['phase']
+        if phase in ('countdown', 'racing') and info['round'] != self.round:
+            self.load_round(info, atmosphere)
+        self.me = next((entry for entry in info['standings'] if entry['id'] == network.player_id), None)
+        current = self.round == info['round']
+        if self.me and current:
+            self.sync(self.me, dt)
+        self.clock = network.server_time() - info['start']
+        if phase == 'countdown' and self.me and current:
+            self.hold(atmosphere)
+        elif (phase == 'racing' and self.me and current and self.me['status'] == 'racing'
+              and self.finish_time is None and self.passed < len(self.course)):
+            self.track_gate(atmosphere)
+        self.previous_position = plane_point(atmosphere)
+        self.rings = self.course[self.passed:] if phase in ('countdown', 'racing') and current else []
+
+    def sync(self, me, dt):
+        """The server is authoritative: adopt its count, and undo a local pass it never accepted."""
+        if me['gates'] > self.passed:
+            self.passed = me['gates']
+        if me['finish'] is not None:
+            self.finish_time = me['finish']
+        if me['gates'] < self.passed and me['finish'] is None:
+            self.unconfirmed += dt
+            if self.unconfirmed > self.UNCONFIRMED:
+                self.passed, self.finish_time, self.unconfirmed = me['gates'], None, 0.0
+                self.game.flash('GATE NOT CONFIRMED', ui.ALERT)
+        else:
+            self.unconfirmed = 0.0
+
+    def hold(self, atmosphere):
+        """Park the plane on its starting-grid slot until the countdown ends."""
+        x, y, z, heading = race.grid_slot(self.me['slot'])
+        atmosphere.position = np.array([x, z])
+        atmosphere.altitude, atmosphere.heading = y, heading
+        atmosphere.speed = atmosphere.CRUISE_SPEED * atmosphere.speed_scale
+        atmosphere.vertical_speed = atmosphere.bank = atmosphere.flight_pitch = 0.0
+        atmosphere.crash_timer = 0.0
+        atmosphere.fuel = 100.0
+        if self.course:
+            self.side = self.ring_side(atmosphere, self.course[0])
+
+    def track_gate(self, atmosphere):
+        ring = self.course[self.passed]
+        side = self.ring_side(atmosphere, ring)
+        if self.side < 0 <= side:
+            if self.through_gate(atmosphere, ring, side):
+                self.passed += 1
+                if self.passed == len(self.course):
+                    self.finish_time = round(max(0.0, self.clock), 3)
+                    self.game.flash(f'FINISHED  {race_clock(self.finish_time)}', ui.GOOD)
+                    self.game.sound('record')
+                else:
+                    self.game.flash(f'GATE {self.passed}/{len(self.course)}', ui.ACCENT)
+                    self.game.sound('ring')
+                    side = self.ring_side(atmosphere, self.course[self.passed])
+            else:
+                self.game.flash('MISSED - TURN BACK', ui.ALERT)
+                self.game.sound('miss')
+        self.side = side
+
+    def progress(self):
+        return {'round': self.round or 0, 'gates': self.passed, 'finish': self.finish_time}
+
+    def target(self):
+        if (self.me and self.phase in ('countdown', 'racing') and self.finish_time is None
+                and self.passed < len(self.course)):
+            x, y, z, _, _ = self.course[self.passed]
+            return x, y, z, 'GATE'
+        return None
+
+    def on_crash(self, atmosphere):
+        pass
+
+    def finish(self):
+        pass  # rounds end on the server
+
+    def best_text(self):
+        return 'Online only: join a server with --connect'
+
+    # ------------------------------------------------------------------ HUD
+
+    def banner(self, surface, fonts, message, detail=''):
+        ui.text(surface, message, fonts.h2, ui.TEXT, (640, 112), 'midtop', tracking=1, shadow=True)
+        if detail:
+            ui.text(surface, detail, fonts.small, ui.MUTED, (640, 146), 'midtop', shadow=True)
+
+    def draw_hud(self, surface, atmosphere, fonts):
+        info, me, phase = self.info, self.me, self.phase
+        if info is None:
+            self.banner(surface, fonts, 'Connecting to the race server…')
+            return
+        total = info['gates']
+        if phase == 'waiting':
+            self.banner(surface, fonts, 'Waiting for the next round…')
+        elif phase == 'countdown':
+            if me:
+                count = max(1, math.ceil(-self.clock))
+                pulse = 1 - (-self.clock) % 1
+                ui.text(surface, str(count), fonts.display, ui.ACCENT, (640, 236), 'center', shadow=True,
+                        alpha=255 * min(1, 0.4 + pulse))
+                ui.label(surface, f'Round {info["round"]}  ·  {total} gates  ·  get ready', fonts.tiny, (640, 296),
+                         ui.TEXT, 'midtop', shadow=True)
+                self.draw_board(surface, fonts, info)
+            else:
+                self.banner(surface, fonts, f'Joining round {info["round"]}…')
+        elif phase == 'racing':
+            if me:
+                if self.clock < 1.2:
+                    ui.text(surface, 'GO!', fonts.display, ui.GOOD, (640, 236), 'center', shadow=True,
+                            alpha=255 * max(0, 1 - max(0, self.clock) / 1.2))
+                self.draw_progress(surface, fonts, info, me)
+            else:
+                self.banner(surface, fonts, 'Race in progress', 'You join the next round. Watch the leaders or fly the course.')
+            self.draw_board(surface, fonts, info)
+        elif phase == 'results':
+            self.draw_results(surface, fonts, info)
+
+    def draw_progress(self, surface, fonts, info, me):
+        ui.panel(surface, (500, 100, 280, 62))
+        ui.label(surface, 'Position', fonts.tiny, (520, 110))
+        ui.text(surface, f'{race.ordinal(me["place"])}/{len(info["standings"])}', fonts.mono, ui.ACCENT, (520, 126))
+        ui.label(surface, 'Gates', fonts.tiny, (608, 110))
+        ui.text(surface, f'{self.passed}/{info["gates"]}', fonts.mono, ui.TEXT, (608, 126))
+        ui.label(surface, 'Time', fonts.tiny, (686, 110))
+        shown = self.finish_time if self.finish_time is not None else self.clock
+        ui.text(surface, race_clock(shown), fonts.mono, ui.GOOD if self.finish_time is not None else ui.TEXT, (686, 126))
+        if self.finish_time is not None:
+            ui.text(surface, 'Finished  ·  waiting for the others', fonts.small, ui.GOOD, (640, 170), 'midtop', shadow=True)
+
+    def standing_value(self, entry, total):
+        if entry['status'] == 'finished':
+            return race_clock(entry['finish'])
+        if entry['status'] == 'dnf':
+            return 'DNF'
+        return f'{entry["gates"]}/{total}'
+
+    def draw_board(self, surface, fonts, info):
+        standings = info['standings'][:8]
+        if not standings:
+            return
+        my_id = self.game.network.player_id if self.game.network else None
+        box = pygame.Rect(1256 - 280, 124, 280, 40 + 26 * len(standings))
+        ui.panel(surface, box)
+        ui.label(surface, f'Race  ·  round {info["round"]}', fonts.tiny, (box.left + 16, box.top + 12), ui.ACCENT)
+        y = box.top + 34
+        for entry in standings:
+            color = ui.ACCENT if entry['id'] == my_id else ui.TEXT
+            ui.text(surface, race.ordinal(entry['place']), fonts.mono_small, color, (box.left + 16, y))
+            ui.text(surface, entry['name'][:12], fonts.small, color, (box.left + 62, y))
+            gap = f'+{entry["gap"]:.1f}s' if entry['gap'] else ''
+            ui.text(surface, gap, fonts.mono_small, ui.MUTED, (box.right - 82, y), 'topright')
+            ui.text(surface, self.standing_value(entry, info['gates']), fonts.mono_small, color, (box.right - 16, y), 'topright')
+            y += 26
+
+    def draw_results(self, surface, fonts, info):
+        standings = info['standings'][:10]
+        my_id = self.game.network.player_id if self.game.network else None
+        box = pygame.Rect(640 - 270, 150, 540, 140 + 34 * max(1, len(standings)))
+        ui.panel(surface, box, (9, 18, 27, 232))
+        ui.label(surface, f'Round {info["round"]} results', fonts.tiny, (box.left + 36, box.top + 28), ui.ACCENT)
+        winner = standings[0]['name'] if standings and standings[0]['status'] == 'finished' else 'No finishers'
+        ui.text(surface, winner, fonts.h1, ui.TEXT, (box.left + 34, box.top + 48))
+        y = box.top + 108
+        for entry in standings:
+            color = ui.ACCENT if entry['id'] == my_id else ui.TEXT
+            ui.text(surface, race.ordinal(entry['place']), fonts.mono, color, (box.left + 36, y))
+            ui.text(surface, entry['name'], fonts.body, color, (box.left + 100, y))
+            if entry['gap'] and entry['status'] == 'finished':
+                ui.text(surface, f'+{entry["gap"]:.2f}s', fonts.mono_small, ui.MUTED, (box.right - 150, y + 3), 'topright')
+            ui.text(surface, self.standing_value(entry, info['gates']), fonts.mono, color, (box.right - 36, y), 'topright')
+            y += 34
+        left = max(0, math.ceil(info['ends'] - self.game.network.server_time())) if self.game.network else 0
+        ui.text(surface, f'Next round in {left}s', fonts.small, ui.MUTED, (640, box.bottom - 22), 'midbottom')

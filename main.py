@@ -505,8 +505,8 @@ def apply_preset(atmosphere, name):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description='Plane\u00b2: a flight through a living sky.')
-    parser.add_argument('--mode', choices=['menu', 'free', 'rings'], default='menu',
-                        help='Skip the title screen and start a mode')
+    parser.add_argument('--mode', choices=['menu', 'free', 'rings', 'race'], default='menu',
+                        help='Skip the title screen and start a mode (race needs --connect)')
     parser.add_argument('--headless', action='store_true')
     parser.add_argument('--renderer', choices=['auto', 'gpu', 'cpu'], default='auto')
     parser.add_argument('--fps', type=int, default=60, help='Frame cap. Use 0 for uncapped benchmarking.')
@@ -533,6 +533,8 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.game:
         args.mode = 'rings'
+    if args.mode == 'race' and not args.connect:
+        parser.error('--mode race is an online race: add --connect HOST:PORT or ws://...')
     return args
 
 
@@ -607,17 +609,20 @@ def main(argv=None):
     if args.preset:
         apply_preset(atmosphere, args.preset)
     audio = None
-    game = Game(atmosphere, fonts, audio, args.mode, args.seed)
-    game.network = network
+    game = Game(atmosphere, fonts, audio, args.mode, args.seed, network=network)
     if network:
         spawn = network.welcome['spawn']
         atmosphere.position = np.array([spawn['x'],spawn['z']])
         atmosphere.altitude = spawn['y']
+        atmosphere.heading = float(spawn.get('heading',0.0))
     game.frame_limit = max(0, args.fps)
     atmosphere.wireframe = args.wireframe
     if args.altitude is not None:
         atmosphere.altitude = float(np.clip(args.altitude / FEET_PER_METRE, 180, MAX_ALTITUDE))
     systems = build_systems(args)
+    if network:
+        from hud import PilotMarkers
+        systems.append(PilotMarkers(game))
     from plane import PlaneModel, remote_aircraft_mesh
     models = {name: PlaneModel(name) for name in ('classic','f15')}
     if args.plane:
@@ -696,14 +701,15 @@ def main(argv=None):
         game.update(dt, sim_dt)
         atmosphere.sanitize()
         if network:
-            network.publish(atmosphere)
+            racing = game.mode and game.state in ('flying','paused')
+            network.publish(atmosphere, game.mode.progress() if racing else None)
             atmosphere.remote_players = network.players()
         width, height = pygame.display.get_window_size()
         # A minimized window can report 0x0; skip drawing rather than scaling to nothing.
         if width > 0 and height > 0:
             atmosphere.aspect = width / height
             shade = game.scene_shade()
-            world_mesh = game.mode.world_mesh(atmosphere) if game.mode and game.mode.key == 'rings' and game.state in ('flying','paused') else None
+            world_mesh = game.mode.world_mesh(atmosphere) if game.mode and game.mode.key in ('rings','race') and game.state in ('flying','paused') else None
             remote_mesh = remote_aircraft_mesh(atmosphere.remote_players,models,atmosphere)
             if remote_mesh is not None:
                 world_mesh = remote_mesh if world_mesh is None else tuple(
