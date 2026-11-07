@@ -109,6 +109,21 @@ movement and aircraft selections at 20 Hz. Clients interpolate remote aircraft, 
 with the local plane, and show other pilots on the map. The room limit is configurable up to
 100 players. Verification uses two simultaneous game clients.
 
+### Online play (over the internet)
+
+The same server also speaks WebSocket, which is what cloud hosts route. Run it in the cloud with the
+included `render.yaml` (Render → New → Blueprint → this repo, free plan; it installs only
+`requirements-server.txt` and starts `python server.py`, which picks up Render's `$PORT`). Then everyone joins with:
+
+```powershell
+python main.py --connect wss://YOUR-SERVICE.onrender.com --name PilotOne
+```
+
+To test online mode locally: `python server.py --websocket 8080` and `python main.py --connect ws://127.0.0.1:8080`.
+`/health` reports how many pilots are online. A free Render service sleeps after 15 idle minutes and takes about
+a minute to wake, so open `https://YOUR-SERVICE.onrender.com/health` a few minutes before a demo
+(the game also waits up to 75 s when connecting).
+
 This is a LAN multiplayer foundation with client-simulated flight. Competitive authority,
 authentication, matchmaking, shared scoring and cross-player collisions are future work.
 Ring scoring currently runs locally on each client.

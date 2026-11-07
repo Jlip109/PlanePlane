@@ -56,6 +56,29 @@ class RoomServer:
         self.broadcast_task = asyncio.create_task(self.broadcast())
         return self.server.sockets[0].getsockname()[1]
 
+    async def start_websocket(self, host='0.0.0.0', port=8080):
+        """Serve the same protocol over WebSocket (cloud hosts only route HTTP/WebSocket traffic)."""
+        from websockets.asyncio.server import serve
+        self.ws_server = await serve(self.accept_websocket,host,port,process_request=self.health,
+                                     max_size=MAX_LINE,ping_interval=20,ping_timeout=20)
+        if self.broadcast_task is None:
+            self.broadcast_task = asyncio.create_task(self.broadcast())
+        return list(self.ws_server.sockets)[0].getsockname()[1]
+
+    def health(self, connection, request):
+        if request.path in ('/','/health'):
+            return connection.respond(200,f'PlanePlane server ok - {len(self.peers)} pilots online\n')
+        return None
+
+    async def accept_websocket(self, websocket):
+        writer = WebSocketWriter(websocket)
+        sender = asyncio.create_task(writer.pump())
+        try:
+            await self.accept(WebSocketReader(websocket),writer)
+        finally:
+            sender.cancel()
+            await asyncio.gather(sender,return_exceptions=True)
+
     async def accept(self, reader, writer):
         player_id = None
         try:
@@ -125,10 +148,87 @@ class RoomServer:
         if self.server:
             self.server.close()
             await self.server.wait_closed()
+        ws_server = getattr(self,'ws_server',None)
+        if ws_server:
+            ws_server.close()
+            await ws_server.wait_closed()
+
+
+class WebSocketReader:
+    """Looks like asyncio.StreamReader.readline() to RoomServer.accept: one message per line."""
+    def __init__(self, websocket):
+        self.websocket = websocket
+
+    async def readline(self):
+        try:
+            message = await self.websocket.recv()
+        except Exception:
+            return b''
+        if isinstance(message,str):
+            message = message.encode('utf-8')
+        if len(message) > MAX_LINE:
+            raise ValueError('Message too large')
+        return message.rstrip(b'\n')+b'\n'
+
+
+class WebSocketWriter:
+    """Looks like asyncio.StreamWriter to RoomServer: buffered writes sent by pump()."""
+    def __init__(self, websocket):
+        self.websocket = websocket
+        self.queue = deque()
+        self.buffered = 0
+        self.ready = asyncio.Event()
+        self.closing = False
+        self.transport = self
+
+    def get_write_buffer_size(self):
+        return self.buffered
+
+    def write(self, data):
+        if self.closing:
+            return
+        self.queue.append(data)
+        self.buffered += len(data)
+        self.ready.set()
+
+    async def drain(self):
+        while self.queue and not self.closing:
+            await asyncio.sleep(0.005)
+
+    async def pump(self):
+        while not self.closing:
+            await self.ready.wait()
+            self.ready.clear()
+            while self.queue:
+                data = self.queue.popleft()
+                self.buffered -= len(data)
+                try:
+                    await self.websocket.send(data.decode('utf-8').rstrip('\n'))
+                except Exception:
+                    self.close()
+                    return
+
+    def is_closing(self):
+        return self.closing
+
+    def close(self):
+        self.closing = True
+        self.ready.set()
+        asyncio.ensure_future(self.websocket.close())
+
+    async def wait_closed(self):
+        try:
+            await self.websocket.wait_closed()
+        except Exception:
+            pass
 
 
 class NetworkClient:
     def __init__(self, address, name='Pilot', model='classic'):
+        self.websocket = None
+        if address.startswith(('ws://','wss://','http://','https://')):
+            self.connect_websocket(address,name,model)
+            return
         host,separator,port = address.rpartition(':')
         if not separator or not host or not port.isdigit():
             raise ValueError('Use --connect HOST:PORT')
@@ -164,6 +264,71 @@ class NetworkClient:
         self.thread = threading.Thread(target=self.run,name='PlanePlane network',daemon=True)
         self.thread.start()
 
+    def connect_websocket(self, address, name, model):
+        from websockets.sync.client import connect
+        url = 'ws://'+address[7:] if address.startswith('http://') else address
+        url = 'wss://'+url[8:] if url.startswith('https://') else url
+        url = url.rstrip('/')
+        if url.count('/') < 3:
+            url += '/play'
+        # Entered as a context manager (newer websockets warn otherwise); closed explicitly in close().
+        self.websocket = connect(url,open_timeout=75,close_timeout=1,max_size=MAX_LINE).__enter__()
+        try:
+            self.websocket.send(encode({'type':'join','version':VERSION,'name':name,'model':model}).decode().strip())
+            self.welcome = json.loads(self.websocket.recv(timeout=15))
+            if self.welcome.get('type') != 'welcome' or self.welcome.get('version') != VERSION:
+                raise ValueError(self.welcome.get('message','Invalid welcome message'))
+        except TimeoutError as error:
+            self.websocket.close()
+            raise ValueError('Server did not answer') from error
+        except Exception:
+            self.websocket.close()
+            raise
+        self.player_id = self.welcome['id']
+        self.pending = bytearray()
+        self.lock = threading.Lock()
+        self.state = None
+        self.snapshots = deque(maxlen=8)
+        self.status = 'Connected'
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self.run_websocket,name='PlanePlane network',daemon=True)
+        self.thread.start()
+
+    def run_websocket(self):
+        next_send = 0.0
+        try:
+            while not self.stop.is_set():
+                now = time.monotonic()
+                if now >= next_send:
+                    with self.lock:
+                        state = self.state
+                    if state:
+                        self.websocket.send(encode(state).decode().strip())
+                    next_send = now+1/TICK_RATE
+                try:
+                    message = self.websocket.recv(timeout=.01)
+                except TimeoutError:
+                    continue
+                if isinstance(message,bytes):
+                    message = message.decode('utf-8')
+                self.handle(json.loads(message))
+        except Exception as error:
+            if not self.stop.is_set():
+                self.status = f'Disconnected: {error}'
+        finally:
+            self.websocket.close()
+
+    def handle(self, message):
+        if message.get('type') == 'snapshot':
+            players = {}
+            for item in message['players']:
+                state = clean_state(item)
+                players[str(item['id'])] = dict(state,id=str(item['id']),name=str(item['name'])[:24])
+            with self.lock:
+                self.snapshots.append((time.monotonic(),players))
+        elif message.get('type') == 'error':
+            raise ValueError(message.get('message','Server error'))
+
     def publish(self, atmosphere):
         state = {'type':'state','x':float(atmosphere.position[0]),'y':atmosphere.altitude,
                  'z':float(atmosphere.position[1]),'heading':atmosphere.heading,'bank':atmosphere.bank,
@@ -193,16 +358,7 @@ class NetworkClient:
                 while b'\n' in self.pending:
                     line,_,rest = self.pending.partition(b'\n')
                     self.pending = bytearray(rest)
-                    message = json.loads(line)
-                    if message.get('type') == 'snapshot':
-                        players = {}
-                        for item in message['players']:
-                            state = clean_state(item)
-                            players[str(item['id'])] = dict(state,id=str(item['id']),name=str(item['name'])[:24])
-                        with self.lock:
-                            self.snapshots.append((time.monotonic(),players))
-                    elif message.get('type') == 'error':
-                        raise ValueError(message.get('message','Server error'))
+                    self.handle(json.loads(line))
         except (OSError, ValueError, KeyError, TypeError) as error:
             if not self.stop.is_set():
                 self.status = f'Disconnected: {error}'
@@ -242,6 +398,10 @@ class NetworkClient:
 
     def close(self):
         self.stop.set()
+        if self.websocket is not None:
+            self.thread.join(timeout=1)
+            self.websocket.close()
+            return
         try:
             self.socket.shutdown(socket.SHUT_RDWR)
         except OSError:

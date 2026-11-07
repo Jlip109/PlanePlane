@@ -512,7 +512,7 @@ def parse_args(argv=None):
     parser.add_argument('--fps', type=int, default=60, help='Frame cap. Use 0 for uncapped benchmarking.')
     parser.add_argument('--wireframe', action='store_true', help='Start with wireframe rendering')
     parser.add_argument('--plane', choices=['classic','f15'], default=None, help='Aircraft model')
-    parser.add_argument('--connect', help='Join a multiplayer server at HOST:PORT')
+    parser.add_argument('--connect', help='Join a multiplayer server: HOST:PORT on a LAN, or wss://... online')
     parser.add_argument('--name', default='Pilot', help='Multiplayer display name')
     parser.add_argument('--frames', type=int, default=0)
     parser.add_argument('--fullscreen', action='store_true')
@@ -571,6 +571,7 @@ def main(argv=None):
     network = None
     if args.connect:
         from network import NetworkClient
+        print(f'Connecting to {args.connect} ...', flush=True)
         try:
             network = NetworkClient(args.connect,args.name,args.plane or 'classic')
         except (OSError,ValueError) as error:
