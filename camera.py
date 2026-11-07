@@ -73,6 +73,30 @@ NEAR = 1.0
 FAR = 40000.0
 
 
+def project_polygon(atmosphere, points, size):
+    """Clip polygon edges at the near plane before perspective projection."""
+    heading, pitch = view_angles(atmosphere)
+    right, up, forward = (np.array(axis) for axis in basis(heading, pitch))
+    origin = np.array(view_origin(atmosphere))
+    coordinates = []
+    for point in points:
+        relative = np.array(point) - origin
+        coordinates.append((relative @ right, relative @ up, relative @ forward))
+    clipped = []
+    previous = coordinates[-1]
+    for current in coordinates:
+        if (current[2] >= NEAR) != (previous[2] >= NEAR):
+            fraction = (NEAR - previous[2]) / (current[2] - previous[2])
+            clipped.append(tuple(previous[i] + fraction * (current[i] - previous[i]) for i in range(3)))
+        if current[2] >= NEAR:
+            clipped.append(current)
+        previous = current
+    width, height = size
+    focal = height * SCREEN_SCALE
+    return [(float(width / 2 + x / depth * focal), float(height / 2 - y / depth * focal))
+            for x, y, depth in clipped]
+
+
 def basis(heading, pitch):
     """Right, up and forward unit vectors for a view heading/pitch (x east, y up, z north)."""
     sh, ch, sp, cp = math.sin(heading), math.cos(heading), math.sin(pitch), math.cos(pitch)

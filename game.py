@@ -1,69 +1,50 @@
-"""The game director: menus, the active mode, radio, HUD, scores and sound in one state machine.
+"""The game director: menus, flight modes, HUD, scores and sound in one state machine.
 
-States: title -> (pilots | controls) -> flying <-> paused -> results -> title
+States: title -> flying <-> paused -> results -> title
 """
-
-import math
 
 import numpy as np
 import pygame
+import math
 
-import characters
-import world
-from characters import Radio
 from hud import Hud
 from menu import Menu
-from modes import FreeFlight, RingRun, SkyCourier
+from modes import FreeFlight, RingRun
 from scores import Scores
+from plane import PLANE_MODELS
 
 START = {'position': (0.0, -900.0), 'altitude': 700.0, 'heading': 0.0}
-MENU_STATES = ('title', 'pilots', 'controls')
-REFUEL_HEIGHT = 450.0  # fly this low (meters above the city) inside a city to refuel
-REFUEL_RATE = 14.0     # percent of the tank per second
+MENU_STATES = ('title',)
 
 
 class Game:
-    def __init__(self, atmosphere, fonts, audio, mode='menu', pilot=None, seed=None, scores=None):
+    def __init__(self, atmosphere, fonts, audio, mode='menu', seed=None, scores=None):
         self.atmosphere = atmosphere
         self.fonts = fonts
         self.audio = audio
         self.scores = scores if scores is not None else Scores()
-        self.radio = Radio()
+        saved_tuning = self.scores.get('flight_tuning',{})
+        for key,value in saved_tuning.items():
+            if key in atmosphere.flight_tuning and isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value):
+                atmosphere.flight_tuning[key] = round(min(100,max(0,value)))
+        saved_plane = self.scores.get('plane_model', 'classic')
+        atmosphere.plane_id = saved_plane if saved_plane in PLANE_MODELS else 'classic'
         self.hud = Hud(fonts)
-        self.modes = {'free': FreeFlight(self), 'rings': RingRun(self, seed), 'courier': SkyCourier(self, seed)}
+        self.modes = {'free': FreeFlight(self), 'rings': RingRun(self, seed)}
         self.mode = None
-        self.pilot_index = self.pick_pilot(pilot)
-        self.apply_pilot()
         self.hud_transform = (1.0, 0, 0)
         self.menu = Menu(self, fonts)
         self.state = 'title'
         self.quit_requested = False
-        self.city = None
         self.refueling = False
+        self.frame_limit = 60
+        self.network = None
         if mode in self.modes:
             self.start(mode)
         else:
             atmosphere.autopilot = True
 
     # ------------------------------------------------------------------ helpers
-
-    def pick_pilot(self, wanted):
-        if wanted is not None:
-            for index, pilot in enumerate(characters.PILOTS):
-                if str(wanted).lower() in (str(index), pilot.role.lower(), pilot.name.split()[0].lower()):
-                    return index
-        saved = self.scores.get('pilot', 0)
-        return saved if 0 <= saved < len(characters.PILOTS) else 0
-
-    def apply_pilot(self):
-        pilot = characters.PILOTS[self.pilot_index]
-        self.atmosphere.speed_scale = pilot.speed
-        self.atmosphere.handling = pilot.handling
-        self.atmosphere.boost_scale = pilot.boost
-
-    @property
-    def pilot(self):
-        return characters.PILOTS[self.pilot_index]
 
     @property
     def flying(self):
@@ -97,9 +78,6 @@ class Game:
         self.mode = self.modes[key]
         self.atmosphere.autopilot = False
         self.reset_flight()
-        self.radio.clear()
-        self.hud.show_help = False
-        self.city = None
         self.state = 'flying'
         self.mode.start(self.atmosphere)
         self.sound('start')
@@ -107,7 +85,6 @@ class Game:
     def to_title(self):
         self.state = 'title'
         self.mode = None
-        self.radio.clear()
         self.atmosphere.autopilot = True
         self.menu.age = 0.0
 
@@ -116,17 +93,6 @@ class Game:
             return
         if action in self.modes:
             self.start(action)
-        elif action == 'pilot':
-            self.menu.pilot_choice = self.pilot_index
-            self.state = 'pilots'
-        elif action == 'pilot_chosen':
-            self.pilot_index = self.menu.pilot_choice
-            self.scores.data['pilot'] = self.pilot_index
-            self.scores.save()
-            self.apply_pilot()
-            self.state = 'title'
-        elif action == 'controls':
-            self.state = 'controls'
         elif action == 'title':
             self.to_title()
         elif action == 'resume':
@@ -135,30 +101,55 @@ class Game:
             self.start(self.mode.key if self.mode else 'free')
         elif action == 'quit':
             self.quit_requested = True
+        elif action in ('frame_limit', 'fps_up', 'fps_down'):
+            self.cycle_frame_limit(-1 if action == 'fps_down' else 1)
+        elif action == 'aircraft':
+            self.cycle_aircraft()
 
     def handle_event(self, event):
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_F8:
+            self.cycle_aircraft()
+            return
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_F7:
+            self.cycle_frame_limit()
+            return
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_F5:
+            self.atmosphere.wireframe = not self.atmosphere.wireframe
+            return
         if event.type == pygame.KEYDOWN and event.key == pygame.K_m:
             if self.audio:
                 self.audio.toggle_mute()
             return
         if self.state == 'flying':
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    if self.hud.show_help:
-                        self.hud.show_help = False
-                    else:
-                        self.state = 'paused'
-                        self.menu.pause_index = 0
-                elif event.key == pygame.K_h:
-                    self.hud.show_help = not self.hud.show_help
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                self.state = 'paused'
+                self.menu.pause_index = 0
             return
         self.act(self.menu.handle_event(event, self.state))
+
+    def cycle_frame_limit(self, direction=1):
+        limits = (60, 120, 0)
+        index = limits.index(self.frame_limit) if self.frame_limit in limits else 0
+        self.frame_limit = limits[(index + direction) % len(limits)]
+        self.sound('tick')
+
+    def cycle_aircraft(self):
+        models = list(PLANE_MODELS)
+        self.atmosphere.plane_id = models[(models.index(self.atmosphere.plane_id)+1) % len(models)]
+        self.scores.data['plane_model'] = self.atmosphere.plane_id
+        self.scores.save()
+
+    def set_tuning(self, key, value):
+        if key not in self.atmosphere.flight_tuning:
+            return
+        self.atmosphere.flight_tuning[key] = round(min(100,max(0,value)))
+        self.scores.data['flight_tuning'] = dict(self.atmosphere.flight_tuning)
+        self.scores.save()
 
     def update(self, dt, sim_dt):
         atmosphere = self.atmosphere
         self.menu.update(dt)
         self.hud.update(sim_dt)
-        self.radio.update(sim_dt)
         if self.audio:
             self.audio.update(dt, atmosphere, self.flying)
         if self.state in MENU_STATES:
@@ -166,30 +157,13 @@ class Game:
         if self.state != 'flying' or not self.mode:
             self.refueling = False
             return
-        self.refuel(sim_dt)
         for name, _ in atmosphere.events:
             if name == 'crash':
                 self.mode.on_crash(atmosphere)
-        city = world.city_at(atmosphere.position[0], atmosphere.position[1])
-        if city is not None and city != self.city:
-            self.hud.city_banner(city)
-        self.city = city
         self.mode.update(sim_dt, atmosphere)
         if self.mode.finished:
             self.state = 'results'
-            self.radio.clear()
             self.sound('record' if self.mode.summary and self.mode.summary['record'] else 'deliver')
-
-    def refuel(self, dt):
-        """Every city has an airfield: fly low over it and the tank fills up."""
-        atmosphere = self.atmosphere
-        city = world.city_at(atmosphere.position[0], atmosphere.position[1])
-        low = city is not None and atmosphere.altitude < world.CITY_LEVELS[city] + REFUEL_HEIGHT
-        near = city is not None and math.hypot(atmosphere.position[0] - world.CITIES[city][1],
-                                               atmosphere.position[1] - world.CITIES[city][2]) < world.CITIES[city][3] * 0.75
-        self.refueling = bool(low and near and not atmosphere.crashed and atmosphere.fuel < 100)
-        if self.refueling:
-            atmosphere.fuel = min(100.0, atmosphere.fuel + REFUEL_RATE * dt)
 
     # ------------------------------------------------------------------ drawing
 
@@ -210,6 +184,5 @@ class Game:
         self.hud.draw(surface, self.atmosphere, self, fps, renderer)
         if self.mode:
             self.mode.draw_hud(surface, self.atmosphere, self.fonts)
-        self.radio.draw(surface, self.fonts)
         if self.state in ('paused', 'results'):
             self.menu.draw(surface, self.state)

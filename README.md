@@ -1,71 +1,119 @@
-# Plane² — HackRPI 2026 "In the Clouds"
+# Plane² — In the Clouds
 
-A flight through a living sky. Drifting cloud decks, a full day and night cycle, live real-world weather, and a countryside of farms, forests, lakes, villages and six cities to explore.
+A Python flight game with two modes, a third-person aircraft, flat-coloured terrain, and a living sky.
 
-## Run it
+## Run
 
-```
-pip install -r requirements.txt
+```powershell
+python -m pip install -r requirements.txt
 python main.py
 ```
 
-Python 3.10 or newer. On Python 3.14 the requirements install `pygame-ce` (regular pygame has no 3.14 build yet); everything else is identical. If your graphics driver can't do OpenGL 3.3, run `python main.py --renderer cpu`.
-
-Useful options: `--mode free|rings|courier` skips the title screen, `--city "Troy, NY"` starts with live weather, `--preset storm` starts in a thunderstorm, `--camera first` starts in the cockpit, `--altitude 5000` (feet), `--fullscreen`, `--mute`.
-
-## Play
-
-| Mode | What you do |
-| --- | --- |
-| **Free Flight** | Fly anywhere. Each city's tower greets you the first time you arrive; discover all six. |
-| **Ring Run** | Thread the gold gate before the clock runs out. Every gate adds time; clean runs build a ×5 combo. |
-| **Sky Courier** | Five passengers, five deliveries. Fly low over a city to pick up, then race to the destination for a tip. |
-
-Pick one of four pilots on the title screen — each flies a little differently (cruise speed, handling, boost).
+Choose **Free Roam** to explore or **Ring Mode** to fly through ten-sided 3D gates.
+Clear gates before the timer runs out to gain time and build a score multiplier.
+Gates rotate around their flight axis. Their pass-through boundary rotates with them,
+and the GPU uses shared depth testing for aircraft and gates.
 
 ## Controls
 
-| Key | Action |
+| Control | Action |
 | --- | --- |
-| W / S | Climb / descend |
-| A / D | Turn |
-| Space (hold) | Boost from about 168 mph toward Mach 1 (about 761 mph), burning extra fuel and reducing turning/climbing authority. Release to ease back to cruise. |
-| V | Chase camera / cockpit view |
-| Right mouse (hold), ↑ / ↓, R | Look around (orbits the plane in chase view), center view |
-| 1 2 3 4 | Clear, broken cloud, overcast with rain, thunderstorm |
-| L | Live weather for your city (Open-Meteo, no API key) |
-| ← / →, P, [ ] | Move the clock, pause the day cycle, cycle speed |
-| , / . | Less / more wind |
-| G | Season (summer, autumn, winter) |
-| H | All controls |
-| Esc | Pause menu |
-| M | Mute |
-| F11 | Fullscreen |
+| Up / Down or W / S | Emergency climb / descent; uses extra fuel |
+| Left / Right or A / D | Emergency banking and turning; uses extra fuel |
+| Hold Space | Accelerate toward Mach 5, using extra fuel |
+| Hold left mouse and drag | Smoothly aim and steer the aircraft; the camera follows its motion |
+| Hold right mouse and drag | Look around without steering |
+| R | Center the camera |
+| V | Switch chase / cockpit camera |
+| F5 | Toggle terrain, aircraft, and gate wireframe |
+| F7 | Cycle 60 FPS, 120 FPS, and Uncapped |
+| Esc | Release captured mouse, then pause / resume |
+| F11 or Alt+Enter | Fullscreen |
+| F8 | Switch between Original and F-15 aircraft |
+| F1 / F2 / F3 / F4 | Clear, broken clouds, overcast, storm |
+| L | Toggle live weather |
+| G | Summer / autumn / winter colours |
+| P | Pause the day cycle |
+| [ / ] | Slow / accelerate the day cycle |
+| Comma / Period | Decrease / increase wind |
 
-## The aircraft
+Choose an aircraft from the title menu or press F8 during flight. The choice is saved.
+The aircraft casts a sun-projected silhouette shadow, sharp near the ground and softer and fainter at altitude.
+All gameplay audio is disabled.
 
-The chase camera shows the team's Blender aircraft (`assets/PlaneModel-PlaneGame.blend`, exported to `assets/plane_mesh.npz`). The HUD uses feet for altitude, mph for airspeed and wind, and US gallons for fuel. You start with a 20-gallon tank; an empty tank disables boost and climbing and the plane slows into a glide. Fly low over any city's center to refuel. Mach 1 uses the standard sea-level speed of sound at 59°F; at the cap the HUD shows `MACH 1 - SPEED OF SOUND`.
+Press Esc to open the pause menu's three flight-tuning sliders: W/S climb response,
+acceleration, and A/D steering. Each runs from 0 to 100; higher values respond faster.
+Changes apply when you resume and save automatically. Defaults are **V60 A50 S50**;
+use the displayed V/A/S values when reporting how the controls feel.
+W/S response controls both vertical motion and nose smoothing: 0 eases in slowly
+(about six seconds to 95% climb rate), while 100 responds almost immediately
+(about 0.15 seconds). It also changes how quickly the plane levels off after release.
+The maximum W/S climb and descent speed scales from the original speed at 0
+to triple that speed at 100, with intermediate settings scaling proportionally.
+These sliders also apply while holding left click: climb response and movement
+use the W/S setting, turns use the A/D setting, and Space acceleration uses the
+acceleration setting while mouse steering is active.
+Mouse and keyboard commands add independently on both axes. Full mouse input plus
+a matching key gives 200% of one input's steering force; opposing commands cancel.
+Keyboard steering costs an extra 0.18% of the tank per second per active axis,
+including when counteracting the mouse. Arrow keys follow the same rules as WASD.
+Releasing the keys removes the extra fuel cost and returns to mouse-only steering.
+The pause menu also has a frame-cap selector. The map shows heading, the aircraft, and gate targets.
+The HUD uses feet, mph, and US gallons. The tank starts at 20 gallons. Boost trades fuel and
+control authority for speed, with twice the original acceleration. Both planes currently
+max out at Mach 5 (about 3,806 mph), using a fixed sea-level speed-of-sound reference of about 761 mph.
+Releasing boost eases back to cruise.
 
-## The world
+## Launch options
 
-| City | Character |
-| --- | --- |
-| Troy | Brick river town and home base |
-| Skyport | Glass towers above the haze |
-| Nimbus Heights | Spires that pierce the clouds |
-| Albany | The capital, dense and busy |
-| Lake George | Lakeside resort town |
-| Saratoga | Gardens, porches and racetracks |
+```powershell
+python main.py --mode rings --fps 120
+python main.py --mode free --fps 0 --wireframe
+python main.py --fullscreen --city "Troy, NY"
+```
 
-Buildings are real 3D geometry on the GPU renderer, ray-marched through each city's lot grid; windows and streets light up at night. The same integer hashes generate the world in Python and GLSL, so what you see is exactly what you can crash into.
+`--city` chooses a live-weather source. `--renderer cpu` enables the CPU fallback.
+`--altitude` accepts feet. `--day-length` sets real seconds per simulated 24-hour day.
 
-## Code map
+Three small city clusters use 36 buildings derived from the supplied Blender models,
+with flat material colours and distance culling. The CPU fallback uses simple building
+proxies beyond 700 metres; the GPU renderer keeps the exported meshes.
 
-`main.py` flight sim, CPU renderer and main loop · `gpu_renderer.py` OpenGL sky, terrain, cities and aircraft · `plane.py` aircraft mesh · `world.py` terrain, cities, villages · `game.py` game states · `modes.py` Free Flight, Ring Run, Sky Courier · `menu.py`, `hud.py`, `ui.py` interface · `characters.py` pilots, towers, passengers, radio · `life.py` balloons and geese · `effects.py` rain and lightning · `weather.py` live weather · `audio.py` synthesized sound · `scores.py` saved bests (`~/.planeplane/scores.json`)
+## Multiplayer baseline
+
+Start a server on the host computer:
+
+```powershell
+python server.py --host 0.0.0.0 --port 8765
+```
+
+Join from the same computer:
+
+```powershell
+python main.py --connect 127.0.0.1:8765 --name PilotOne --plane classic
+```
+
+On another computer on the LAN, replace `HOST_IP` with the server computer's IPv4 address:
+
+```powershell
+python main.py --connect HOST_IP:8765 --name PilotTwo --plane f15
+```
+
+The server assigns player IDs, distributes a world seed and starting clock, and relays validated
+movement and aircraft selections at 20 Hz. Clients interpolate remote aircraft, share GPU depth
+with the local plane, and show other pilots on the map. The room limit is configurable up to
+100 players. Verification uses two simultaneous game clients.
+
+This is a LAN multiplayer foundation with client-simulated flight. Competitive authority,
+authentication, matchmaking, shared scoring and cross-player collisions are future work.
+Ring scoring currently runs locally on each client.
+
+Both selectable models use the same flight physics. The original `.blend` / `.blend1` files
+and runtime `.npz` exports are under `assets/`; Blender is only needed when exporting a new model.
 
 ## Tests
 
-```
-pip install -r requirements-dev.txt
+```powershell
+python -m pip install -r requirements-dev.txt
 python -m pytest
 ```

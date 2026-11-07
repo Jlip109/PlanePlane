@@ -1,4 +1,4 @@
-"""In-flight HUD: heading tape, flight readouts, location, radar, banners and the controls page."""
+"""In-flight HUD with flight readouts, weather, heading and a navigation map."""
 
 import math
 
@@ -8,36 +8,19 @@ import ui
 import world
 from units import FEET_PER_METRE, MPH_PER_MPS
 
-CONTROLS = [
-    ('Flying', [('W  S', 'Climb / descend'), ('A  D', 'Turn'), ('SPACE', 'Boost toward Mach 1'),
-                ('V', 'Chase / cockpit view'), ('RIGHT MOUSE', 'Hold to look around'), ('↑  ↓', 'Look up / down'), ('R', 'Center view')]),
-    ('World', [('1  2  3  4', 'Clear / broken / overcast / storm'), ('L', 'Live weather for your city'),
-               ('←  →', 'Move the clock'), ('P', 'Pause the day cycle'), ('[  ]', 'Day cycle speed'),
-               (',  .', 'Less / more wind'), ('G', 'Season')]),
-    ('Game', [('H', 'This page'), ('ESC', 'Pause menu'), ('M', 'Mute sound'), ('F11', 'Fullscreen')]),
-]
 SEASONS = ['Summer', 'Autumn', 'Winter']
 
 
 class Hud:
     def __init__(self, fonts):
         self.fonts = fonts
-        self.show_help = False
-        self.banner = None
         self.flash = None
         self.radar_range = 8 * 1609.344
-
-    def city_banner(self, index):
-        self.banner = (index, 0.0)
 
     def flash_text(self, message, color):
         self.flash = (message, color, 0.0)
 
     def update(self, dt):
-        if self.banner:
-            self.banner = (self.banner[0], self.banner[1] + dt)
-            if self.banner[1] > 5:
-                self.banner = None
         if self.flash:
             self.flash = (self.flash[0], self.flash[1], self.flash[2] + dt)
             if self.flash[2] > 1.4:
@@ -46,25 +29,27 @@ class Hud:
     def draw(self, surface, atmosphere, game, fps, renderer):
         fonts = self.fonts
         target = game.mode.target() if game.mode else None
-        if not atmosphere.third_person:
+        if not atmosphere.third_person or atmosphere.mouse_steering:
             self.draw_reticle(surface)
         self.draw_heading_tape(surface, atmosphere, target)
-        self.draw_location(surface, atmosphere)
+        self.draw_weather(surface, atmosphere)
         self.draw_readouts(surface, atmosphere, game.refueling)
         self.draw_radar(surface, atmosphere, target)
-        if self.banner:
-            self.draw_banner(surface)
+        if game.network:
+            status = game.network.status
+            text = f'ONLINE  {len(atmosphere.remote_players)+1} PILOTS' if status == 'Connected' else 'DISCONNECTED'
+            ui.text(surface,text,fonts.tiny,ui.MUTED,(24,478),shadow=True)
         if self.flash:
             message, color, age = self.flash
             alpha = 255 * ui.fade_in_out(age, 1.4, 0.25)
             ui.text(surface, message, fonts.h2, color, (640, 176), 'midtop', tracking=2, alpha=alpha, shadow=True)
         if atmosphere.crashed:
             self.draw_crash(surface, atmosphere)
-        ui.hint_row(surface, [('H', 'Controls'), ('ESC', 'Pause')], fonts, (1256, 704), 'bottomright')
+        limit = f'{game.frame_limit} FPS' if game.frame_limit else 'Uncapped'
+        ui.hint_row(surface, [('F5', 'Wireframe'), ('F7', limit), ('ESC', 'Pause')], fonts, (1256, 704), 'bottomright')
         ui.text(surface, f'{renderer}  {fps:.0f} FPS', fonts.tiny, ui.MUTED, (1256, 670), 'bottomright', shadow=True)
-        if self.show_help:
-            self.draw_controls(surface)
-
+        from plane import PLANE_MODELS
+        ui.text(surface,PLANE_MODELS[atmosphere.plane_id][0]+'  ·  F8',fonts.tiny,ui.MUTED,(24,454),shadow=True)
     def draw_reticle(self, surface):
         color = (238, 241, 236, 200)
         pygame.draw.line(surface, color, (612, 360), (630, 360), 2)
@@ -98,25 +83,15 @@ class Hud:
         pygame.draw.polygon(surface, ui.ACCENT, [(640, box.bottom + 1), (634, box.bottom + 9), (646, box.bottom + 9)])
         ui.text(surface, f'{heading:03.0f}°', fonts.mono_small, ui.TEXT, (640, box.bottom + 12), 'midtop', shadow=True)
 
-    def draw_location(self, surface, atmosphere):
+    def draw_weather(self, surface, atmosphere):
         fonts = self.fonts
-        x, z = atmosphere.position
-        city = world.city_at(x, z)
-        if city is not None:
-            ui.label(surface, 'Over', fonts.tiny, (24, 22), shadow=True)
-            ui.text(surface, world.CITIES[city][0].title(), fonts.h2, ui.TEXT, (24, 38), shadow=True)
-        else:
-            nearest, distance = world.nearest_city(x, z)
-            ui.label(surface, 'Countryside', fonts.tiny, (24, 22), shadow=True)
-            ui.text(surface, f'{world.CITIES[nearest][0].title()}  {ui.format_distance(distance)}',
-                    fonts.h2, ui.TEXT, (24, 38), shadow=True)
         minutes = int(atmosphere.hour * 60) % 1440
         clock = f'{minutes // 60:02d}:{minutes % 60:02d}'
         if atmosphere.cycle_paused:
             clock += '  (paused)'
-        weather = atmosphere.weather_label.title().replace('  ', ' · ')
+        weather = 'Live weather' if atmosphere.weather_label.startswith('LIVE') else 'Simulated weather'
         ui.text(surface, f'{weather}  ·  {clock}  ·  {SEASONS[atmosphere.ground_mode]}',
-                fonts.small, ui.TEXT, (24, 72), shadow=True)
+                fonts.small, ui.TEXT, (24, 28), shadow=True)
 
     def draw_readouts(self, surface, atmosphere, refueling=False):
         fonts = self.fonts
@@ -135,7 +110,7 @@ class Hud:
             ui.label(surface, name, fonts.tiny, (value_rect.left, 22), shadow=True)
             x = value_rect.left - 28
         if atmosphere.speed >= atmosphere.MAX_SPEED:
-            state, color = 'MACH 1 - SPEED OF SOUND', ui.ACCENT
+            state, color = 'MACH 5 - SPEED LIMIT', ui.ACCENT
         elif refueling:
             state, color = 'Refueling', ui.GOOD
         elif atmosphere.boosting:
@@ -176,28 +151,16 @@ class Hud:
 
         north, _ = to_radar(px, pz + self.radar_range * 0.86, clamp=False)
         ui.text(surface, 'N', fonts.tiny, ui.MUTED, north, 'center')
-        for index, (name, cx, cz, city_radius, _, _) in enumerate(world.CITIES):
-            pos, inside = to_radar(cx, cz)
-            size = max(3, int(city_radius * scale)) if inside else 3
-            pygame.draw.circle(surface, (238, 241, 236, 150 if inside else 90), pos, size, 0 if not inside else 1)
-            if inside:
-                ui.text(surface, name.title(), fonts.tiny, ui.MUTED, (pos[0], pos[1] + size + 2), 'midtop')
         if target:
             pos, inside = to_radar(target[0], target[2])
             pygame.draw.circle(surface, ui.ACCENT, pos, 6, 2)
+        for player in atmosphere.remote_players:
+            pos, inside = to_radar(player['x'],player['z'])
+            pygame.draw.circle(surface,(90,210,245),pos,3)
         pygame.draw.polygon(surface, ui.TEXT, [(center[0], center[1] - 7), (center[0] - 5, center[1] + 5),
                                                (center[0], center[1] + 2), (center[0] + 5, center[1] + 5)])
         ui.label(surface, f'{self.radar_range / 1609.344:.0f} mi', fonts.tiny, (center[0], center[1] + radius + 6),
                  ui.DIM, 'midtop')
-
-    def draw_banner(self, surface):
-        index, age = self.banner
-        alpha = 255 * ui.fade_in_out(age, 5.0, 0.8)
-        name, *_, description = world.CITIES[index]
-        fonts = self.fonts
-        ui.label(surface, 'Now arriving', fonts.tiny, (640, 214), ui.ACCENT, 'midtop', alpha, shadow=True)
-        ui.text(surface, name, fonts.h1, ui.TEXT, (640, 232), 'midtop', tracking=8, alpha=alpha, shadow=True)
-        ui.text(surface, description, fonts.body, ui.TEXT, (640, 284), 'midtop', alpha=alpha, shadow=True)
 
     def draw_crash(self, surface, atmosphere):
         fonts = self.fonts
@@ -206,21 +169,3 @@ class Hud:
         surface.blit(tint, (0, 0))
         ui.text(surface, 'CRASHED', fonts.h1, ui.TEXT, (640, 300), 'midtop', tracking=10, shadow=True)
         ui.text(surface, 'Recovering altitude…', fonts.body, ui.TEXT, (640, 352), 'midtop', shadow=True)
-
-    def draw_controls(self, surface):
-        fonts = self.fonts
-        box = pygame.Rect(240, 104, 800, 508)
-        ui.panel(surface, box, (9, 18, 27, 236))
-        ui.label(surface, 'Controls', fonts.tiny, (box.left + 40, box.top + 30), ui.ACCENT)
-        columns = [(box.left + 40, CONTROLS[0:1] + CONTROLS[2:3]), (box.left + 420, CONTROLS[1:2])]
-        for x, groups in columns:
-            y = box.top + 62
-            for title, rows in groups:
-                ui.text(surface, title, fonts.h2, ui.TEXT, (x, y))
-                y += 38
-                for key, action in rows:
-                    cap = ui.key_cap(surface, key, fonts, (x, y))
-                    ui.text(surface, action, fonts.small, ui.MUTED, (x + 132, cap.centery), 'midleft')
-                    y += 31
-                y += 14
-        ui.text(surface, 'Press H to close', fonts.small, ui.DIM, (box.right - 40, box.bottom - 24), 'bottomright')

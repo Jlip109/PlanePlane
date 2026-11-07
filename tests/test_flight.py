@@ -61,18 +61,18 @@ def test_runtime_mesh_is_finite_and_triangular():
     assert mesh.colors.min() >= 0 and mesh.colors.max() <= 1
 
 
-def test_boost_reaches_and_holds_mach_one(atmosphere):
+def test_boost_reaches_and_holds_mach_five(atmosphere):
     held = Keys({pygame.K_SPACE: 1})
-    for _ in range(300):
+    for _ in range(600):
         atmosphere.update(0.05, held)
         assert atmosphere.speed <= atmosphere.MAX_SPEED
-    assert atmosphere.mach == pytest.approx(1)
+    assert atmosphere.mach == pytest.approx(5)
     atmosphere.update(0.1, Keys())
-    assert atmosphere.mach < 1
+    assert atmosphere.mach < 5
 
 
 @pytest.mark.parametrize('fraction,at_limit', [(0.9999, False), (1.0, True)])
-def test_imperial_hud_and_sound_limit(atmosphere, fonts, monkeypatch, fraction, at_limit):
+def test_imperial_hud_and_mach_five_limit(atmosphere, fonts, monkeypatch, fraction, at_limit):
     import ui
     from hud import Hud
     from units import FEET_PER_METRE, MPH_PER_MPS
@@ -85,7 +85,13 @@ def test_imperial_hud_and_sound_limit(atmosphere, fonts, monkeypatch, fraction, 
     Hud(fonts).draw_readouts(pygame.Surface((1280, 720), pygame.SRCALPHA), atmosphere)
     text = '\n'.join(labels)
     assert 'ft' in labels and 'mph' in labels and '20.0 US gal' in labels
-    assert ('SPEED OF SOUND' in text) == at_limit
-    assert ('1.00' in labels) == at_limit
+    assert ('MACH 5 - SPEED LIMIT' in text) == at_limit
+    assert ('5.00' in labels) == at_limit
     assert FEET_PER_METRE == pytest.approx(3.280839895)
-    assert atmosphere.MAX_SPEED * MPH_PER_MPS == pytest.approx(761.2, abs=0.1)
+    assert atmosphere.MAX_SPEED * MPH_PER_MPS == pytest.approx(3806.0, abs=0.2)
+
+
+def test_mach_readout_keeps_speed_of_sound_reference(atmosphere):
+    from units import SPEED_OF_SOUND_MPS
+    atmosphere.speed = SPEED_OF_SOUND_MPS
+    assert atmosphere.mach == pytest.approx(1)

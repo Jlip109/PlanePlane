@@ -1,13 +1,14 @@
 """OpenGL atmosphere renderer. Textures stay on the GPU between frames."""
 
 from pathlib import Path
+import math
 
 import moderngl
 import numpy as np
 
 import world
 from camera import view_angles, view_origin
-from plane import plane_rotation
+from plane import plane_rotation, shadow_inverse
 
 
 VERTEX_SHADER = """
@@ -38,71 +39,16 @@ uniform vec3 sun_direction;
 uniform vec3 moon_direction;
 uniform float time;
 uniform int season;
+uniform bool wireframe;
+uniform sampler2D aircraft_shadow;
+uniform bool shadow_enabled;
+uniform vec3 aircraft_position;
+uniform vec2 shadow_size;
+uniform mat2 shadow_inverse;
 uniform vec4 layers[4]; // elevation, opacity, wind multiplier, texture offset
 """
 
 SHADER_MAIN = """
-// How much sunlight reaches world point p through the cloud decks above it.
-float cloud_shadow(vec3 p) {
-    if (sun_direction.y < 0.05) return 1.0;
-    float light = 1.0;
-    for (int i = 0; i < 4; ++i) {
-        vec4 layer = layers[i];
-        if (layer.x <= p.y) continue;
-        vec2 q = p.xz + sun_direction.xz / sun_direction.y * (layer.x - p.y) - drift * layer.z;
-        vec2 texel = q / 11.0 + vec2(layer.w, layer.w * 2.0);
-        texel = 255.0 - abs(mod(texel, 510.0) - 255.0);
-        float density = texture(cloud_texture, (texel + 0.5) / 256.0).r;
-        float threshold = 0.83 - cover * 0.53 + layer.x / 3000.0 * 0.09;
-        light *= 1.0 - smoothstep(threshold - 0.06, threshold + 0.20, density) * layer.y * 0.9;
-    }
-    return light;
-}
-
-// Nearest building hit among the cities the ray crosses and the villages near it.
-bool trace_buildings(vec3 o, vec3 d, float t_limit, vec2 ground_point,
-                     out float t_best, out vec3 n_best, out ivec2 cell_best, out float h_best, out vec4 a_best, out vec4 b_best) {
-    t_best = t_limit;
-    bool found = false;
-    vec4 a, b;
-    for (int i = 0; i < CITY_COUNT + 2; ++i) {
-        if (i < CITY_COUNT) {
-            a = CITY_A[i];
-            b = CITY_B[i];
-        } else {
-            // the villages around the camera and around where the ray lands
-            if (!village_at(i == CITY_COUNT ? o.xz : ground_point, a)) continue;
-            if (i == CITY_COUNT + 1 && village_at(o.xz, b) && b.xy == a.xy) continue;
-            b = STYLE_B[VILLAGE_STYLE];
-        }
-        vec2 oc = o.xz - a.xy;
-        float qa = dot(d.xz, d.xz), qb = dot(oc, d.xz), qc = dot(oc, oc) - a.z * a.z;
-        float disc = qb * qb - qa * qc;
-        if (disc < 0.0 || qa < 1e-9) continue;
-        float s = sqrt(disc);
-        float t0 = (-qb - s) / qa, t1 = (-qb + s) / qa;
-        float top = a.w + b.y + 1.0;
-        if (abs(d.y) > 1e-6) {
-            float ta = (a.w - o.y) / d.y, tb = (top - o.y) / d.y;
-            t0 = max(t0, min(ta, tb));
-            t1 = min(t1, max(ta, tb));
-        } else if (o.y < a.w || o.y > top) {
-            continue;
-        }
-        t0 = max(t0, 0.0);
-        t1 = min(t1, t_best);
-        float t;
-        vec3 n;
-        ivec2 cell;
-        float h;
-        if (t0 < t1 && trace_settlement(o, d, t0, t1, a, b, t, n, cell, h) && t < t_best) {
-            t_best = t; n_best = n; cell_best = cell; h_best = h; a_best = a; b_best = b;
-            found = true;
-        }
-    }
-    return found;
-}
-
 void main() {
     // Keep the original 16:9 field of view, including when resized.
     vec2 screen = (uv - 0.5) * vec2(resolution.x / resolution.y, 1.0) / 0.924444;
@@ -167,17 +113,24 @@ void main() {
         vec3 normal = normalize(vec3(ground_height(world - vec2(e, 0.0)) - ground_height(world + vec2(e, 0.0)), 2.0 * e,
                                      ground_height(world - vec2(0.0, e)) - ground_height(world + vec2(0.0, e))));
         vec3 p = vec3(world.x, altitude + dy * distance, world.y);
-        surface = ground * (ambient + sun_light * max(0.0, dot(normal, sun_direction)) * cloud_shadow(p));
-        if (raw_terrain(world) < WATER && ground_height(world) <= WATER + 0.01 && season != 2) {
-            // Lakes: Fresnel mix of deep water and the reflected sky, with a sun glint.
-            vec2 ripple = vec2(sin(world.x * 0.09 + time * 1.3), sin(world.y * 0.11 - time)) * 0.015
-                * (1.0 - smoothstep(300.0, 2000.0, distance));
-            vec3 reflected = reflect(direction, normalize(vec3(ripple.x, 1.0, ripple.y)));
-            vec2 reflect_uv = (vec2(clamp(phase, 0.0, 1.0), clamp(1.0 - reflected.y / 0.65, 0.0, 1.0)) * 63.0 + 0.5) / 64.0;
-            vec3 sky_reflection = texture(sky_palette, reflect_uv).rgb * (1.0 - cover * 0.3);
-            float fresnel = 0.08 + 0.92 * pow(1.0 - max(0.0, reflected.y), 4.0);
-            surface = mix(vec3(0.03, 0.09, 0.12) * (ambient + sun_light * 0.4), sky_reflection, fresnel)
-                + sun_color * pow(max(0.0, dot(reflected, sun_direction)), 220.0) * visibility * (1.0 - cover);
+        surface = ground * (ambient + sun_light * max(0.0, dot(normal, sun_direction)));
+        if (shadow_enabled && sun_direction.y > 0.08) {
+            float height = max(0.0, aircraft_position.y - p.y);
+            vec2 delta = world + sun_direction.xz / sun_direction.y * height - aircraft_position.xz;
+            vec2 local = shadow_inverse * delta;
+            vec2 shadow_uv = local / shadow_size + 0.5;
+            if (all(greaterThanEqual(shadow_uv, vec2(0.0))) && all(lessThanEqual(shadow_uv, vec2(1.0)))) {
+                float softness = 0.12 + height * 0.015;
+                float lod = clamp(log2(1.0 + softness * 256.0 / min(shadow_size.x,shadow_size.y)),0.0,8.0);
+                float shade = textureLod(aircraft_shadow,shadow_uv,lod).r;
+                surface *= 1.0 - shade * 0.55 / (1.0+height/700.0) * (1.0-cover*0.65);
+            }
+        }
+        if (wireframe) {
+            vec2 grid = world / 160.0;
+            vec2 edge = abs(fract(grid - 0.5) - 0.5) / max(fwidth(grid), vec2(0.0001));
+            float line = 1.0 - smoothstep(0.45, 1.3, min(edge.x, edge.y));
+            surface = mix(vec3(0.015, 0.03, 0.045), vec3(0.25, 0.85, 0.66), line);
         }
         emit = vec3(1.0, 0.72, 0.38) * lamp * night * 0.9;
         scene_t = distance;
@@ -185,74 +138,12 @@ void main() {
         hit = true;
     }
 
-    // Buildings: march the lot grid of any city or village the ray passes over.
-    float t_hit;
-    vec3 n_hit;
-    ivec2 cell_hit;
-    float h_hit;
-    vec4 a_hit, b_hit;
-    if (trace_buildings(origin, dir3, min(scene_t, 9000.0), ground_point, t_hit, n_hit, cell_hit, h_hit, a_hit, b_hit)) {
-        vec3 p = origin + dir3 * t_hit;
-        int style = int(b_hit.x + 0.5);
-        bool glassy = style == 1 || style == 5;
-        vec3 direct = sun_light * max(0.0, dot(n_hit, sun_direction)) * cloud_shadow(p);
-        float range = t_hit * length(dir3);
-        vec3 color;
-        emit = vec3(0.0);
-        float m = lot_margin(cell_hit);
-        vec2 local = p.xz - vec2(cell_hit) * CELL;
-        if (n_hit.y > 0.5) {
-            color = (hash01(cell_hit.x, cell_hit.y, 37) > 0.5 ? ROOF_A[style] : ROOF_B[style])
-                * (0.85 + 0.3 * hash01(cell_hit.x, cell_hit.y, 43));
-            if (season == 2) color = mix(color, vec3(0.92), 0.7);
-            // darker parapet around the roof edge
-            float rim = min(min(local.x - m, CELL - m - local.x), min(local.y - m, CELL - m - local.y));
-            color *= 0.75 + 0.25 * smoothstep(0.4, 1.4, rim);
-            color *= ambient + direct;
-            vec2 center = (vec2(cell_hit) + 0.5) * CELL;
-            if (h_hit > 110.0 && distance(p.xz, center) < 2.5) {
-                emit = vec3(1.0, 0.1, 0.05) * step(0.5, fract(time * 0.8 + hash01(cell_hit.x, cell_hit.y, 61)));
-            }
-        } else {
-            vec3 wall = WALL[style] * (0.82 + 0.36 * hash01(cell_hit.x, cell_hit.y, 43));
-            float u = abs(n_hit.x) > 0.5 ? p.z : p.x;
-            float v = p.y - a_hit.w;
-            vec2 w = vec2(u / (glassy ? 3.0 : 4.0), v / 3.6);
-            vec2 f = fract(w);
-            float fade = 1.0 - smoothstep(350.0, 1600.0, range);
-            vec2 pane = glassy ? vec2(0.06, 0.12) : vec2(0.22, 0.28);
-            float window = step(pane.x, f.x) * step(f.x, 1.0 - pane.x) * step(pane.y, f.y) * step(f.y, 0.86) * step(3.0, v);
-            // Glass reflects the sky; brick and stone windows stay dark.
-            vec3 view_reflect = reflect(direction, n_hit);
-            vec2 sky_uv = (vec2(clamp(phase, 0.0, 1.0), clamp(1.0 - view_reflect.y / 0.65, 0.0, 1.0)) * 63.0 + 0.5) / 64.0;
-            vec3 sky_reflection = texture(sky_palette, sky_uv).rgb * (1.0 - cover * 0.3);
-            vec3 glass = mix(wall * 0.3 * (ambient + direct), sky_reflection * (0.35 + 0.65 * daylight), glassy ? 0.38 : 0.2);
-            vec3 lit_wall = wall * (ambient + direct);
-            color = mix(lit_wall, glass, mix(glassy ? 0.55 : 0.3, window * (glassy ? 0.8 : 0.9), fade));
-            color *= 0.72 + 0.28 * smoothstep(0.0, 10.0, v);
-            ivec2 wi = ivec2(floor(w)) + cell_hit * 41;
-            float lit = mix(0.3, step(hash01(wi.x, wi.y, 51), 0.4) * window, fade);
-            vec3 tint = mix(WINDOW_LIGHT[style], vec3(0.85, 0.9, 1.0), step(0.8, hash01(wi.x, wi.y, 52)));
-            emit = tint * lit * night * 0.85;
-        }
-        surface = color;
-        scene_t = t_hit;
-        hit = true;
-    }
     if (hit) {
         // Aerial perspective: exponential haze, warmer toward the sun.
         float range = scene_t * length(dir3);
         float haze = max(1.0 - exp(-range / (14000.0 - cover * 5000.0)), smoothstep(7000.0, 20000.0, range));
         vec3 haze_color = sky + sun_color * pow(max(0.0, alignment), 6.0) * 0.18 * visibility;
         sky = mix(surface, haze_color, haze) + emit * (1.0 - haze * 0.7);
-    } else if (night > 0.0 && direction.y < 0.25) {
-        // City glow on the horizon at night.
-        for (int i = 0; i < CITY_COUNT; ++i) {
-            vec3 to_city = vec3(CITY_A[i].x - position.x, CITY_A[i].w + 60.0 - altitude, CITY_A[i].y - position.y);
-            float d = length(to_city);
-            float near = pow(max(0.0, dot(direction, to_city / d)), 400.0 * CITY_A[i].z / max(d, 1.0) + 40.0);
-            sky += vec3(1.0, 0.62, 0.32) * near * night * 0.35 * smoothstep(40000.0, 4000.0, d);
-        }
     }
 
     float sunset = exp(-pow((phase - 0.48) / 0.17, 2.0));
@@ -278,6 +169,7 @@ void main() {
         sky = mix(sky, cloud_color, fog);
     }
     frag_color = vec4(sky, 1.0);
+    gl_FragDepth = hit ? clamp(0.5 + 0.5 * (20001.0 / 19999.0 - 40000.0 / (19999.0 * max(scene_t,1.0))),0.0,1.0) : 1.0;
 }
 """
 
@@ -313,7 +205,8 @@ in vec2 uv;
 out vec4 frag_color;
 uniform sampler2D hud;
 void main() {
-    frag_color = texture(hud, vec2(uv.x, 1.0 - uv.y));
+    vec4 color = texture(hud, vec2(uv.x, 1.0 - uv.y));
+    frag_color = vec4(color.rgb * color.a, color.a);
 }
 """
 
@@ -330,8 +223,10 @@ uniform vec2 camera_angles;
 uniform float aspect;
 out vec3 normal;
 out vec3 color;
+out vec3 world_position;
 void main() {
-    vec3 p = rotation * in_position + plane_center - camera_origin;
+    world_position = rotation * in_position + plane_center;
+    vec3 p = world_position - camera_origin;
     float sh = sin(camera_angles.x), ch = cos(camera_angles.x);
     float sp = sin(camera_angles.y), cp = cos(camera_angles.y);
     float depth = p.x * sh * cp + p.y * sp + p.z * ch * cp;
@@ -349,12 +244,17 @@ PLANE_FRAGMENT_SHADER = """
 #version 330
 in vec3 normal;
 in vec3 color;
+in vec3 world_position;
 uniform vec3 sun_direction;
+uniform float unlit;
+uniform bool clip_terrain;
 out vec4 frag_color;
 void main() {
+    float ground = max(15.0,100.0+130.0*sin(world_position.x/1700.0)*cos(world_position.z/1500.0));
+    if (clip_terrain && world_position.y < ground) discard;
     float daylight = smoothstep(-0.12, 0.35, sun_direction.y);
     float light = 0.24 + daylight * (0.35 + 0.41 * max(0.0, dot(normalize(normal), sun_direction)));
-    frag_color = vec4(color * light, 1.0);
+    frag_color = vec4(color * mix(light, 1.0, unlit), 1.0);
 }
 """
 
@@ -366,6 +266,8 @@ class GPURenderer:
         self.offscreen = offscreen
         self.target = None
         self.context = moderngl.create_context(require=330)
+        self.context.depth_func = '<='
+        self.city_resources = []
         self.name = self.context.info['GL_RENDERER']
         self.program = self.context.program(vertex_shader=VERTEX_SHADER, fragment_shader=ATMOSPHERE_SHADER)
         self.hud_program = self.context.program(vertex_shader=VERTEX_SHADER, fragment_shader=HUD_SHADER)
@@ -382,11 +284,16 @@ class GPURenderer:
         self.scale = 1.0
         self.scene_texture = None
         self.scene_fbo = None
+        self.scene_depth = None
         self.slow_time = 0.0
         self.fast_time = 0.0
         self.plane_program = None
         self.plane_buffer = None
         self.plane_vao = None
+        self.shadow_texture = None
+        self.shadow_size = (1.0,1.0)
+        self.gate_vao = None
+        self.gate_buffer = None
         assets = Path(__file__).parent / 'assets'
         self.cloud = self.load_texture(assets / 'Cloud.png')
         self.palette = self.load_texture(assets / 'skycolors.png')
@@ -394,14 +301,93 @@ class GPURenderer:
         self.program['sky_palette'] = 1
         self.hud_program['hud'] = 2
         self.hud_texture = None
+        self.panel_texture = None
 
     def set_plane(self, plane):
-        self.plane_program = self.context.program(vertex_shader=PLANE_VERTEX_SHADER,
-                                                   fragment_shader=PLANE_FRAGMENT_SHADER)
+        if self.plane_program is None:
+            self.plane_program = self.context.program(vertex_shader=PLANE_VERTEX_SHADER,
+                                                       fragment_shader=PLANE_FRAGMENT_SHADER)
+        for resource in (self.plane_vao,self.plane_buffer,self.shadow_texture):
+            if resource is not None:
+                resource.release()
+        self.shadow_texture = self.context.texture((256,256),1,
+            (plane.shadow_levels[0]*255).astype('u1').tobytes())
+        self.shadow_texture.build_mipmaps()
+        self.shadow_texture.repeat_x = self.shadow_texture.repeat_y = False
+        self.shadow_texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR,moderngl.LINEAR)
+        self.shadow_size = tuple(plane.shadow_size)
         data = np.concatenate((plane.positions, plane.normals, plane.colors), axis=1).astype('f4')
         self.plane_buffer = self.context.buffer(data.tobytes())
         self.plane_vao = self.context.vertex_array(
             self.plane_program, [(self.plane_buffer, '3f 3f 3f', 'in_position', 'in_normal', 'in_color')])
+
+    def draw_gates(self, mesh, atmosphere, size):
+        if mesh is None or self.plane_program is None:
+            return
+        positions, normals, colors = mesh
+        data = np.concatenate(mesh, axis=1).astype('f4').tobytes()
+        if self.gate_buffer is None:
+            self.gate_buffer = self.context.buffer(reserve=len(data), dynamic=True)
+            self.gate_vao = self.context.vertex_array(self.plane_program,
+                [(self.gate_buffer, '3f 3f 3f', 'in_position', 'in_normal', 'in_color')])
+        if self.gate_buffer.size < len(data):
+            self.gate_buffer.orphan(len(data))
+        self.gate_buffer.write(data)
+        program = self.plane_program
+        program['rotation'].write(np.eye(3, dtype='f4').tobytes())
+        program['plane_center'] = (0,0,0)
+        program['camera_origin'] = view_origin(atmosphere)
+        program['camera_angles'] = view_angles(atmosphere)
+        program['aspect'] = size[0] / size[1]
+        program['sun_direction'] = tuple(atmosphere.sun_direction)
+        program['unlit'] = 1.0
+        program['clip_terrain'] = False
+        self.context.enable(moderngl.DEPTH_TEST)
+        self.context.wireframe = atmosphere.wireframe
+        self.gate_vao.render(moderngl.TRIANGLES, vertices=len(positions))
+        self.context.wireframe = False
+        self.context.disable(moderngl.DEPTH_TEST)
+
+    def clear_depth(self, size):
+        target = self.target if self.offscreen else self.context.screen
+        target.color_mask = (False,False,False,False)
+        target.clear(depth=1.0)
+        target.color_mask = (True,True,True,True)
+        target.use()
+        self.context.viewport = (0,0,*size)
+
+    def set_cities(self, batches):
+        for _,vao,buffer in self.city_resources:
+            vao.release()
+            buffer.release()
+        self.city_resources = []
+        for center,mesh in batches:
+            data = np.concatenate(mesh,axis=1).astype('f4').tobytes()
+            buffer = self.context.buffer(data)
+            vao = self.context.vertex_array(self.plane_program,
+                [(buffer,'3f 3f 3f','in_position','in_normal','in_color')])
+            self.city_resources.append((center,vao,buffer))
+
+    def draw_cities(self, atmosphere, size):
+        if not self.city_resources:
+            return
+        origin = view_origin(atmosphere)
+        program = self.plane_program
+        program['rotation'].write(np.eye(3,dtype='f4').tobytes())
+        program['plane_center'] = (0,0,0)
+        program['camera_origin'] = origin
+        program['camera_angles'] = view_angles(atmosphere)
+        program['aspect'] = size[0]/size[1]
+        program['sun_direction'] = tuple(atmosphere.sun_direction)
+        program['unlit'] = 0.0
+        program['clip_terrain'] = True
+        self.context.enable(moderngl.DEPTH_TEST)
+        self.context.wireframe = atmosphere.wireframe
+        for center,vao,_ in self.city_resources:
+            if math.hypot(center[0]-origin[0],center[1]-origin[2]) <= world.CITY_RENDER_DISTANCE+200:
+                vao.render(moderngl.TRIANGLES)
+        self.context.wireframe = False
+        self.context.disable(moderngl.DEPTH_TEST)
 
     def draw_plane(self, atmosphere, size):
         if self.plane_vao is None or not atmosphere.third_person:
@@ -413,15 +399,12 @@ class GPURenderer:
         program['camera_angles'] = view_angles(atmosphere)
         program['aspect'] = size[0] / size[1]
         program['sun_direction'] = tuple(atmosphere.sun_direction)
-        # Clear only depth, keeping the sky already rendered into the colour buffer.
-        target = self.target if self.offscreen and self.target is not None else self.context.screen
-        target.color_mask = (False, False, False, False)
-        target.clear(depth=1.0)
-        target.color_mask = (True, True, True, True)
-        target.use()
-        self.context.viewport = (0, 0, *size)
+        program['unlit'] = 0.0
+        program['clip_terrain'] = False
         self.context.enable(moderngl.DEPTH_TEST)
+        self.context.wireframe = atmosphere.wireframe
         self.plane_vao.render(moderngl.TRIANGLES)
+        self.context.wireframe = False
         self.context.disable(moderngl.DEPTH_TEST)
 
     def load_texture(self, path):
@@ -441,12 +424,12 @@ class GPURenderer:
             self.target = self.context.simple_framebuffer(size)
         self.target.use()
 
-    def adapt(self, fps, dt):
+    def adapt(self, fps, dt, target_fps=60):
         """Lower the sky's render scale when the frame rate sags, raise it again when there is headroom."""
         if fps <= 0:
             return
-        self.slow_time = self.slow_time + dt if fps < 48 else 0.0
-        self.fast_time = self.fast_time + dt if fps >= 58 else 0.0
+        self.slow_time = self.slow_time + dt if fps < target_fps * 0.8 else 0.0
+        self.fast_time = self.fast_time + dt if fps >= target_fps * 58 / 60 else 0.0
         if self.slow_time > 1.5 and self.scale > 0.5:
             self.scale = round(max(0.5, self.scale - 0.125), 3)
             self.slow_time = 0.0
@@ -458,20 +441,27 @@ class GPURenderer:
     def scene_target(self, size):
         scaled = (max(1, int(size[0] * self.scale)), max(1, int(size[1] * self.scale)))
         if self.scene_texture is None or self.scene_texture.size != scaled:
-            for resource in (self.scene_fbo, self.scene_texture):
+            for resource in (self.scene_fbo, self.scene_texture, self.scene_depth):
                 if resource is not None:
                     resource.release()
             self.scene_texture = self.context.texture(scaled, 3)
             self.scene_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
-            self.scene_fbo = self.context.framebuffer([self.scene_texture])
+            self.scene_depth = self.context.depth_renderbuffer(scaled)
+            self.scene_fbo = self.context.framebuffer([self.scene_texture],self.scene_depth)
         return scaled
 
-    def render(self, atmosphere, size):
+    def render(self, atmosphere, size, world_mesh=None):
+        self.bind_target(size)
+        self.clear_depth(size)
         if self.scale < 0.999:
             scaled = self.scene_target(size)
             self.scene_fbo.use()
+            self.scene_fbo.clear(depth=1.0)
             self.context.viewport = (0, 0, *scaled)
             self.draw_sky(atmosphere, scaled)
+            self.bind_target(size)
+            target = self.target if self.offscreen else self.context.screen
+            self.context.copy_framebuffer(target,self.scene_fbo)
             self.bind_target(size)
             self.context.viewport = (0, 0, *size)
             self.context.disable(moderngl.BLEND)
@@ -482,12 +472,16 @@ class GPURenderer:
             self.context.viewport = (0, 0, *size)
             self.draw_sky(atmosphere, size)
         # The aircraft always renders at full resolution, on top of the sky.
+        self.draw_cities(atmosphere,size)
+        self.draw_gates(world_mesh, atmosphere, size)
         self.draw_plane(atmosphere, size)
 
     def draw_sky(self, atmosphere, size):
         self.context.disable(moderngl.BLEND)
         self.cloud.use(0)
         self.palette.use(1)
+        if self.shadow_texture is not None:
+            self.shadow_texture.use(4)
         heading, pitch = view_angles(atmosphere)
         camera_x, camera_y, camera_z = atmosphere.camera
         uniforms = {
@@ -496,11 +490,18 @@ class GPURenderer:
             'heading': heading, 'pitch': pitch, 'time': atmosphere.elapsed,
             'phase': atmosphere.phase, 'cover': atmosphere.cover,
             'sun_direction': tuple(atmosphere.sun_direction), 'moon_direction': tuple(atmosphere.moon_direction),
+            'aircraft_shadow': 4, 'shadow_enabled': self.shadow_texture is not None,
+            'aircraft_position': (atmosphere.position[0],atmosphere.altitude,atmosphere.position[1]),
+            'shadow_size': self.shadow_size,
+            'wireframe': atmosphere.wireframe,
         }
         for name, value in uniforms.items():
             self.program[name].value = value
+        self.program['shadow_inverse'].write(shadow_inverse(atmosphere).tobytes(order='F'))
         self.program['layers'].write(np.array(atmosphere.cloud_layers(), dtype='f4').tobytes())
+        self.context.enable(moderngl.DEPTH_TEST)
         self.quad.render(moderngl.TRIANGLE_STRIP)
+        self.context.disable(moderngl.DEPTH_TEST)
 
     def draw_shade(self, top, bottom, left):
         self.shade_program['strength'].value = (top, bottom, left)
@@ -508,18 +509,30 @@ class GPURenderer:
         self.context.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
         self.shade_quad.render(moderngl.TRIANGLE_STRIP)
 
-    def draw_hud(self, surface):
-        """Composite an overlay whose colours are premultiplied by alpha."""
+    def draw_hud(self, surface, viewport=None):
+        """Upload straight-alpha pixels directly and premultiply them on the GPU."""
         size = surface.get_size()
-        if self.hud_texture is None or self.hud_texture.size != size:
-            if self.hud_texture is not None:
-                self.hud_texture.release()
-            self.hud_texture = self.context.texture(size, 4)
-        self.hud_texture.write(self.pg.image.tobytes(surface, 'RGBA'))
-        self.hud_texture.use(2)
+        name = 'panel_texture' if viewport is not None else 'hud_texture'
+        texture = getattr(self, name)
+        if texture is None or texture.size != size:
+            if texture is not None:
+                texture.release()
+            texture = self.context.texture(size, 4)
+            setattr(self, name, texture)
+        if surface.get_shifts() == (16, 8, 0, 24):
+            texture.swizzle = 'BGRA'
+            texture.write(surface.get_buffer())
+        else:
+            texture.swizzle = 'RGBA'
+            texture.write(self.pg.image.tobytes(surface, 'RGBA'))
+        texture.use(2)
+        previous_viewport = self.context.viewport
+        if viewport is not None:
+            self.context.viewport = viewport
         self.context.enable(moderngl.BLEND)
         self.context.blend_func = moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA
         self.hud_quad.render(moderngl.TRIANGLE_STRIP)
+        self.context.viewport = previous_viewport
 
     def screenshot(self, size):
         if self.offscreen and self.target is not None:
@@ -537,10 +550,13 @@ class GPURenderer:
         return self.pg.image.frombytes(pixels, size, 'RGB', True)
 
     def close(self):
+        for _,vao,buffer in self.city_resources:
+            vao.release()
+            buffer.release()
         for resource in [self.quad, self.hud_quad, self.shade_quad, self.shade_program, self.scene_quad,
-                         self.scene_program, self.scene_fbo, self.scene_texture, self.vertices, self.program, self.hud_program,
-                         self.plane_vao, self.plane_buffer, self.plane_program,
-                         self.cloud, self.palette, self.hud_texture, self.target]:
+                         self.scene_program, self.scene_fbo, self.scene_texture, self.scene_depth, self.vertices, self.program, self.hud_program,
+                         self.plane_vao, self.plane_buffer, self.plane_program, self.gate_vao, self.gate_buffer,
+                         self.cloud, self.palette, self.hud_texture, self.panel_texture, self.target, self.shadow_texture]:
             if resource is not None:
                 resource.release()
         self.context.release()

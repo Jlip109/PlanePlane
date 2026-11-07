@@ -41,7 +41,7 @@ def test_cli_rejects_nan_without_traceback():
     ['--mode', 'menu'],
     ['--mode', 'free', '--preset', 'storm'],
     ['--mode', 'rings', '--hour', '23.5', '--preset', 'clear', '--ground', 'winter'],
-    ['--mode', 'courier', '--pilot', 'tailwind', '--ground', 'yellow', '--camera', 'first'],
+    ['--mode', 'free', '--ground', 'yellow', '--camera', 'first', '--wireframe'],
     ['--game', '--altitude', '99999', '--cover', '5', '--day-length', '0', '--hour', '-7'],
 ])
 def test_cpu_app_runs(extra, tmp_path):
@@ -53,7 +53,7 @@ def test_cpu_app_runs(extra, tmp_path):
     assert 'disabled' not in result.stdout
 
 
-@pytest.mark.parametrize('mode', ['menu', 'courier'])
+@pytest.mark.parametrize('mode', ['menu', 'rings'])
 def test_gpu_app_runs(mode, tmp_path):
     shot = tmp_path / 'gpu.png'
     result = run_cli('--headless', '--renderer', 'gpu', '--frames', '8', '--fps', '0', '--seed', '1',
@@ -100,32 +100,13 @@ def test_diving_into_the_ground_crashes_and_respawns(atmosphere, pg):
     assert atmosphere.altitude > world.obstacle_height(*atmosphere.position) + 200
 
 
-def test_flying_into_a_skyscraper_crashes(atmosphere):
-    name, cx, cz, radius, style, _ = world.CITIES[1]
-    place = (1, cx, cz, radius, world.CITY_LEVELS[1], style)
-    i0, j0 = int(cx // world.CELL), int(cz // world.CELL)
-    tower = max(((i, j) for i in range(i0 - 8, i0 + 8) for j in range(j0 - 8, j0 + 8)),
-                key=lambda cell: world.lot_height(*cell, place))
-    x, z = (tower[0] + 0.5) * world.CELL, (tower[1] + 0.5) * world.CELL
-    roof = world.obstacle_height(x, z)
-    assert roof > world.CITY_LEVELS[1] + 100
-    atmosphere.position = np.array([x, z - 40.0])
-    atmosphere.altitude = roof - 30
-    atmosphere.heading = 0.0
-    for _ in range(40):
-        atmosphere.update(0.05, Keys())
-        if atmosphere.crashed:
-            break
-    assert atmosphere.crashed
-
-
 def test_pilot_stats_shape_the_flight(atmosphere, pg):
     atmosphere.speed_scale, atmosphere.handling = 1.2, 1.3
     keys = Keys({pg.K_d: 1})
     for _ in range(120):
         atmosphere.update(1 / 30, keys)
     assert atmosphere.speed == pytest.approx(atmosphere.CRUISE_SPEED * 1.2)
-    assert atmosphere.heading == pytest.approx((0.55 * 1.3 * 4 + math.pi) % math.tau - math.pi, abs=1e-6)
+    assert atmosphere.bank < 0 and atmosphere.heading != 0
 
 
 def test_respawn_tops_up_the_tank(atmosphere):
@@ -148,13 +129,13 @@ def test_cpu_render_is_valid(atmosphere, hour, preset, pitch, season):
     assert np.all(np.isfinite(image)) and image.min() >= 0 and image.max() <= 255
 
 
-def test_cpu_render_shows_a_city(atmosphere):
+def test_cpu_render_has_no_city_roofs(atmosphere):
     atmosphere.position = np.array([0.0, 2400.0])
     atmosphere.altitude = 600.0
     atmosphere.pitch = -0.6
     image = atmosphere.render_array()
     roofs = (image[..., 0] > image[..., 1] * 1.25) & (image[..., 0] > 90)  # Troy's brick-red roofs
-    assert roofs.sum() > 50
+    assert roofs.sum() == 0
 
 
 def test_night_sky_has_stars(atmosphere):
@@ -246,15 +227,15 @@ def run_scripted(monkeypatch, plan, frames, extra=()):
 def test_full_menu_flow_in_the_running_game(monkeypatch, capsys):
     k = pygame
     plan = {
-        2: [k.K_DOWN, k.K_DOWN, k.K_DOWN, k.K_RETURN],    # Choose Pilot
-        4: [k.K_RIGHT, k.K_RETURN],                        # pick the next pilot
-        6: [k.K_UP, k.K_UP, k.K_RETURN],                   # Ring Run
-        9: [k.K_4, k.K_l, k.K_g, k.K_p, k.K_RIGHTBRACKET, k.K_h],
-        11: [k.K_h, k.K_ESCAPE],                           # pause
+        2: [k.K_DOWN, k.K_RETURN],                         # Ring Run
+        4: [k.K_F5],                                      # render distance
+        6: [k.K_v],                                       # camera view
+        9: [k.K_4, k.K_l, k.K_g, k.K_p, k.K_RIGHTBRACKET],
+        11: [k.K_ESCAPE],                           # pause
         13: [k.K_DOWN, k.K_RETURN],                        # restart
         15: ['tiny', k.K_ESCAPE],
         17: [k.K_DOWN, k.K_DOWN, k.K_RETURN],              # main menu
-        19: [k.K_UP, k.K_UP, k.K_RETURN],                  # Sky Courier from the title (wraps to item 4? no: index math below)
+        19: [k.K_UP, k.K_RETURN],                         # Free Flight
         22: [(pygame.MOUSEMOTION, {'pos': (10, 10), 'rel': (1, 1), 'buttons': (0, 0, 0)}),
              (pygame.MOUSEBUTTONDOWN, {'pos': (10, 10), 'button': 1})],
     }

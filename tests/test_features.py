@@ -12,7 +12,6 @@ import world
 from audio import Audio
 from effects import WeatherEffects
 from game import Game
-from life import SkyLife
 from scores import Scores
 
 GEO = {'results': [
@@ -154,66 +153,10 @@ def test_crash_costs_time_in_ring_run(atmosphere, fake_game):
     assert run.time_left == before - 5 and run.combo == 1
 
 
-# ------------------------------------------------------------------ courier
-
-def hover_over(atmosphere, city_index, courier, seconds=2.0):
-    _, cx, cz, _, _, _ = world.CITIES[city_index]
-    fly_to(atmosphere, cx, world.CITY_LEVELS[city_index] + 300, cz, 0)
-    for _ in range(int(seconds / 0.1)):
-        courier.update(0.1, atmosphere)
-
-
-def test_courier_shift_from_pickup_to_payday(atmosphere, fake_game):
-    courier = modes.SkyCourier(fake_game, seed=5)
-    fly_to(atmosphere, 0, 700, -900, 0)
-    courier.start(atmosphere)
-    assert courier.job['origin'] == 0  # Troy is nearest to the start
-    for delivered in range(courier.JOBS):
-        job = courier.job
-        hover_over(atmosphere, job['origin'], courier)
-        assert job['stage'] == 'deliver'
-        if delivered == 1:
-            courier.on_crash(atmosphere)
-            assert job['damaged']
-        hover_over(atmosphere, job['destination'], courier)
-        assert courier.done == delivered + 1
-    assert courier.finished and courier.summary['score'] > 0
-    assert fake_game.scores.get('courier_best') == courier.score
-    assert fake_game.sounds.count('deliver') == courier.JOBS
-
-
-def test_courier_needs_you_to_fly_low(atmosphere, fake_game):
-    courier = modes.SkyCourier(fake_game, seed=5)
-    fly_to(atmosphere, 0, 700, -900, 0)
-    courier.start(atmosphere)
-    _, cx, cz, _, _, _ = world.CITIES[0]
-    fly_to(atmosphere, cx, world.CITY_LEVELS[0] + 900, cz, 0)
-    for _ in range(50):
-        courier.update(0.1, atmosphere)
-    assert courier.job['stage'] == 'pickup'
-
-
-def test_free_flight_greets_each_city_once(atmosphere, fake_game):
-    free = modes.FreeFlight(fake_game)
-    fly_to(atmosphere, 0, 700, -900, 0)
-    free.start(atmosphere)
-    fly_to(atmosphere, 0, 700, 3400, 0)
-    free.update(0.1, atmosphere)
-    assert fake_game.scores.get('visited', []) == ['TROY']
-    calls = [call[1] for call in fake_game.radio.queue]
-    assert any('first time' in call for call in calls)
-    fly_to(atmosphere, 0, 700, -900, 0)
-    free.update(0.1, atmosphere)
-    fly_to(atmosphere, 0, 700, 3400, 0)
-    free.update(0.1, atmosphere)
-    later = [call[1] for call in fake_game.radio.queue]
-    assert sum('first time' in call for call in later) == 1 and 'miles per hour' in later[-1]
-
-
 # ------------------------------------------------------------------ the game director
 
 def make_game(atmosphere, fonts, tmp_path, mode='menu'):
-    return Game(atmosphere, fonts, Audio(pygame, enabled=False), mode, None, 1, Scores(tmp_path / 's.json'))
+    return Game(atmosphere, fonts, Audio(pygame, enabled=False), mode, 1, Scores(tmp_path / 's.json'))
 
 
 def press(game, key):
@@ -223,17 +166,9 @@ def press(game, key):
 def test_game_state_machine(atmosphere, fonts, tmp_path):
     game = make_game(atmosphere, fonts, tmp_path)
     assert game.state == 'title' and atmosphere.autopilot
-    for _ in range(3):
-        press(game, pygame.K_DOWN)
+    press(game, pygame.K_DOWN)
     press(game, pygame.K_RETURN)
-    assert game.state == 'pilots'
-    press(game, pygame.K_RIGHT)
-    press(game, pygame.K_RETURN)
-    assert game.state == 'title' and game.pilot_index == 1 and game.scores.get('pilot') == 1
-    assert atmosphere.speed_scale == characters.PILOTS[1].speed
-    press(game, pygame.K_UP)
-    press(game, pygame.K_RETURN)
-    assert game.state == 'flying' and game.mode.key == 'courier' and not atmosphere.autopilot
+    assert game.state == 'flying' and game.mode.key == 'rings'
     press(game, pygame.K_ESCAPE)
     assert game.paused
     press(game, pygame.K_ESCAPE)
@@ -242,7 +177,7 @@ def test_game_state_machine(atmosphere, fonts, tmp_path):
     game.update(0.1, 0.1)
     assert game.state == 'results'
     press(game, pygame.K_RETURN)
-    assert game.flying and game.mode.done == 0
+    assert game.flying and game.mode.score == 0
     press(game, pygame.K_ESCAPE)
     for _ in range(2):
         press(game, pygame.K_DOWN)
@@ -252,19 +187,16 @@ def test_game_state_machine(atmosphere, fonts, tmp_path):
     assert game.quit_requested
 
 
-@pytest.mark.parametrize('mode', ['free', 'rings', 'courier'])
+@pytest.mark.parametrize('mode', ['free', 'rings'])
 def test_hud_and_menus_draw_in_every_state(atmosphere, fonts, tmp_path, mode):
     game = make_game(atmosphere, fonts, tmp_path, mode)
     surface = pygame.Surface((1280, 720), pygame.SRCALPHA)
     overlay = pygame.Surface((333, 187), pygame.SRCALPHA)
-    game.hud.city_banner(2)
     game.flash('+9s', (255, 255, 255))
-    game.radio.say(characters.TOWERS['TROY'], 'Testing, one two.')
-    for state in ('flying', 'paused', 'results', 'title', 'pilots', 'controls'):
+    for state in ('flying', 'paused', 'results', 'title'):
         game.state = state
         if state == 'results' and hasattr(game.mode, 'finish'):
             game.mode.finish()
-        game.hud.show_help = state == 'flying'
         atmosphere.crash_timer = 1.0 if state == 'paused' else 0.0
         for _ in range(3):
             game.update(0.2, 0.2)
@@ -291,30 +223,18 @@ def test_menu_mouse_hover_and_click(atmosphere, fonts, tmp_path):
 @pytest.mark.parametrize('size', [(1, 1), (3, 2), (1280, 720), (3840, 1080)])
 @pytest.mark.parametrize('turn', [0.0, 1.6, 3.14])
 def test_overlays_draw_at_any_size_and_angle(atmosphere, fake_game, size, turn):
-    run, effects, life = modes.RingRun(fake_game, seed=5), WeatherEffects(seed=5), SkyLife(seed=5)
+    run, effects = modes.RingRun(fake_game, seed=5), WeatherEffects(seed=5)
     run.start(atmosphere)
     atmosphere.precipitation = atmosphere.storm = 1.0
     atmosphere.altitude = 500.0
-    life.time = 30
     for _ in range(40):
-        for system in (effects, life):
+        for system in (effects,):
             system.update(0.1, atmosphere)
         run.update(0.016, atmosphere)
     atmosphere.look_yaw = turn
     surface = pygame.Surface(size, pygame.SRCALPHA)
-    for system in (effects, life, run):
+    for system in (effects, run):
         system.draw_world(surface, atmosphere)
-
-
-def test_balloons_show_up_near_cities(atmosphere):
-    life = SkyLife(seed=1)
-    balloon = life.balloons[0]
-    x, y, z = balloon.position(0.0)
-    fly_to(atmosphere, x, y, z - 400, 0)
-    atmosphere.cover = 0.0
-    surface = pygame.Surface((1280, 720), pygame.SRCALPHA)
-    life.draw_world(surface, atmosphere)
-    assert surface.get_bounding_rect().width > 20
 
 
 def test_storm_makes_lightning_and_rain_stops_above_clouds(atmosphere):
@@ -338,7 +258,6 @@ def test_every_character_has_a_portrait(pg):
         image = person.portrait(64)
         assert image.get_size() == (64, 64)
         assert image.get_at((0, 0)).a == 0 and image.get_at((32, 32)).a == 255
-    assert set(characters.TOWERS) == {city[0] for city in world.CITIES}
     for passenger in characters.PASSENGERS:
         assert '{dest}' in passenger.ask and passenger.thanks
 

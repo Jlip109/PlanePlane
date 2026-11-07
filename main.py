@@ -11,7 +11,7 @@ import numpy as np
 
 import world
 from camera import view_angles, view_origin
-from units import FEET_PER_METRE
+from units import FEET_PER_METRE, SPEED_OF_SOUND_MPS, MAX_FLIGHT_SPEED_MPS
 
 DEFAULT_PITCH = 0.03
 PRESETS = {  # cover, wind, precipitation, storm
@@ -60,7 +60,7 @@ def star_field(dx, dy, dz, ray_length, night, cover, t):
 
 CLOUD_LAYERS = [(850, 0.52, 0.85, 24), (1450, 0.43, 1.0, 97), (2150, 0.32, 1.23, 161), (3000, 0.20, 1.5, 233)]
 MAX_ALTITUDE = 5500.0
-CLIMB_RATE = 430.0
+CLIMB_RATE = 60.0
 
 
 class NoKeys:
@@ -75,7 +75,7 @@ class Atmosphere:
     HEIGHT = 180
     FOCAL = WIDTH * 0.52
     CRUISE_SPEED = 75.0
-    MAX_SPEED = 340.294  # Standard sea-level speed of sound at 59 degrees Fahrenheit, in m/s.
+    MAX_SPEED = MAX_FLIGHT_SPEED_MPS
     FUEL_CAPACITY_GALLONS = 20.0
 
     def __init__(self, pygame):
@@ -92,6 +92,8 @@ class Atmosphere:
         self.heading = 0.0
         self.pitch = DEFAULT_PITCH
         self.look_yaw = 0.0
+        self.look_target_yaw = 0.0
+        self.look_target_pitch = DEFAULT_PITCH
         self.hour = 9.0
         self.day_length = 240.0
         self.cycle_paused = False
@@ -117,14 +119,16 @@ class Atmosphere:
         self.speed_scale = 1.0
         self.handling = 1.0
         self.boost_scale = 1.0
+        self.wireframe = False
+        self.mouse_steering = False
+        self.flight_tuning = {'climb':60,'acceleration':50,'steering':50}
+        self.shadow_model = None
+        self.plane_id = 'classic'
+        self.remote_players = []
         self.defaults = {name: value for name, value in vars(self).items() if isinstance(value, float)}
         self.weather_label = 'SIMULATED WEATHER'
         self.boosting = False
         self.third_person = False
-        self.pilot_cam = False      # camera in front of the canopy, looking back at the pilot
-        self.emote = None           # key from emotes.EMOTES while the pilot is performing one
-        self.emote_time = 0.0       # atmosphere.elapsed when the emote started
-        self.pilot_avatar = 'pilot_male_01'  # people asset id of the selected pilot
         self.autopilot = False
         self.crashes = 0
         self.events = []
@@ -160,8 +164,22 @@ class Atmosphere:
         return view_origin(self)
 
     @property
+    def climb_response_rate(self):
+        # 0: a two-second time constant; 100: 0.05 seconds. Higher is faster.
+        response_time = 2.0 * (0.05 / 2.0) ** (self.flight_tuning['climb'] / 100)
+        return 1.0 / response_time
+
+    @property
+    def climb_rate(self):
+        return CLIMB_RATE * (1 + 2*self.flight_tuning['climb']/100)
+
+    @property
+    def vertical_acceleration(self):
+        return self.climb_rate * self.climb_response_rate
+
+    @property
     def mach(self):
-        return self.speed / self.MAX_SPEED
+        return self.speed / SPEED_OF_SOUND_MPS
 
     @property
     def gallons(self):
@@ -172,11 +190,18 @@ class Atmosphere:
         self.phase = float(1 - smoothstep(-0.20, 0.20, self.sun_direction[1]))
 
     def mouse_look(self, relative):
-        self.look_yaw = (self.look_yaw + relative[0] * 0.0025 + math.pi) % math.tau - math.pi
-        self.pitch = float(np.clip(self.pitch - relative[1] * 0.0025, -1.5, 1.5))
+        self.look_target_yaw = (self.look_target_yaw + relative[0] * 0.0025 + math.pi) % math.tau - math.pi
+        self.look_target_pitch = float(np.clip(self.look_target_pitch - relative[1] * 0.0025,-1.5,1.5))
+
+    def set_mouse_steering(self, enabled):
+        if self.mouse_steering and not enabled:
+            self.look_target_yaw = 0.0
+            self.look_target_pitch = DEFAULT_PITCH
+        self.mouse_steering = enabled
 
     def reset_view(self):
         self.look_yaw, self.pitch = 0.0, DEFAULT_PITCH
+        self.look_target_yaw, self.look_target_pitch = 0.0, DEFAULT_PITCH
 
     def cloud_layers(self):
         """(elevation, opacity, wind scale, seed) for each cloud deck, farthest from the camera first."""
@@ -216,9 +241,9 @@ class Atmosphere:
                 + (self.texture[x, y1] * (1 - fx) + self.texture[x1, y1] * fx) * fy)
 
     def autopilot_keys(self):
-        """Title-screen sightseeing: a slow circle around Troy, rising and falling over the rooftops."""
+        """Title-screen sightseeing: a slow circle over the landscape."""
         pg = self.pg
-        _, cx, cz, _, _, _ = world.CITIES[0]
+        cx, cz = 0.0, 0.0
         dx, dz = self.position[0] - cx, self.position[1] - cz
         orbit = math.atan2(dx, dz) + math.pi / 2 + float(np.clip((math.hypot(dx, dz) - 2600) / 2000, -0.6, 0.6))
         turn = (orbit - self.heading + math.pi) % math.tau - math.pi
@@ -232,6 +257,10 @@ class Atmosphere:
         pg = self.pg
         dt = min(max(dt, 0.0), 0.15) if math.isfinite(dt) else 0.0
         self.elapsed += dt
+        camera_ease = 1-math.exp(-dt*8)
+        look_delta = (self.look_target_yaw-self.look_yaw+math.pi) % math.tau-math.pi
+        self.look_yaw = (self.look_yaw+look_delta*camera_ease+math.pi) % math.tau-math.pi
+        self.pitch += (self.look_target_pitch-self.pitch)*camera_ease
         press = self.autopilot_keys() if self.autopilot else keys.__getitem__
         if self.crashed:
             press = NoKeys().__getitem__
@@ -239,10 +268,8 @@ class Atmosphere:
             if self.crash_timer <= 0:
                 self.respawn()
         self.fly(dt, press)
-        self.pitch = float(np.clip(self.pitch + (press(pg.K_UP) - press(pg.K_DOWN)) * dt * 0.35, -1.5, 1.5))
         if not self.cycle_paused:
             self.hour += dt * 24 / self.day_length
-        self.hour += (press(pg.K_RIGHT) - press(pg.K_LEFT)) * dt * 2
         self.update_lighting()
         self.wind = float(np.clip(self.wind + (press(pg.K_PERIOD) - press(pg.K_COMMA)) * dt * 9, 0, 45))
         self.drift += np.array([math.sin(self.wind_angle), math.cos(self.wind_angle)]) * self.wind * dt
@@ -257,23 +284,46 @@ class Atmosphere:
             self.speed = 0.0
             self.vertical_speed = 0.0
             return
-        # Boost pushes toward Mach 1 and burns fuel; the faster you go, the less the controls bite.
+        # Boost pushes toward Mach 5 and burns fuel; the faster you go, the less the controls bite.
         cruise = self.CRUISE_SPEED * self.speed_scale
         self.boosting = bool(press(pg.K_SPACE) and self.fuel > 0)
         target_speed = self.MAX_SPEED if self.boosting else (cruise if self.fuel > 0 else 45.0)
-        acceleration = 35.0 if self.boosting else 25.0
+        acceleration = 25.0
+        if target_speed > self.speed:
+            acceleration = 70.0 if self.boosting else 50.0
+        acceleration *= 2**((self.flight_tuning['acceleration']-50)/30)
         self.speed += float(np.clip(target_speed - self.speed, -acceleration * dt, acceleration * dt))
         self.speed = float(np.clip(self.speed, 0, self.MAX_SPEED))
         fast = max(float(self.boosting), float(np.clip((self.speed - cruise) / (self.MAX_SPEED - cruise), 0, 1)))
         control = 1 - fast * 0.55
-        turn = press(pg.K_d) - press(pg.K_a)
-        climb = (press(pg.K_w) - press(pg.K_s)) * control if self.fuel > 0 else -0.025
-        self.heading = (self.heading + turn * dt * 0.55 * control * self.handling + math.pi) % math.tau - math.pi
-        self.bank += (-turn * 0.40 * control - self.bank) * (1 - math.exp(-dt * 5))
-        self.flight_pitch += (climb * 0.30 - self.flight_pitch) * (1 - math.exp(-dt * 3))
-        burn = 0.08 + 0.48 * self.boosting / self.boost_scale + max(0, climb) * 0.06
+        keyboard_turn = max(press(pg.K_d), press(pg.K_RIGHT)) - max(press(pg.K_a), press(pg.K_LEFT))
+        keyboard_climb = max(press(pg.K_w), press(pg.K_UP)) - max(press(pg.K_s), press(pg.K_DOWN))
+        mouse_turn = mouse_climb = 0.0
+        if self.mouse_steering and not self.autopilot:
+            mouse_turn = float(np.clip(self.look_yaw * 2.5, -1, 1))
+            aim_pitch = float(np.clip(self.pitch - DEFAULT_PITCH,-1.1,1.1))
+            mouse_climb = float(np.clip(self.speed * math.tan(aim_pitch) / CLIMB_RATE,-1,1))
+        # Each input has its own full authority: matching commands stack to 200%.
+        turn = keyboard_turn + mouse_turn
+        climb_input = keyboard_climb + mouse_climb
+        climb = climb_input * control if self.fuel > 0 else -0.025
+        steering = 2**((self.flight_tuning['steering']-50)/50)
+        self.bank += (-turn * 0.50 * control * self.handling * steering - self.bank) * (1 - math.exp(-dt * 4 * steering))
+        previous_heading = self.heading
+        self.heading = (self.heading - self.bank * dt * 1.1 + math.pi) % math.tau - math.pi
+        if self.mouse_steering:
+            changed = (self.heading - previous_heading + math.pi) % math.tau - math.pi
+            self.look_yaw = (self.look_yaw - changed + math.pi) % math.tau - math.pi
+            self.look_target_yaw = (self.look_target_yaw-changed+math.pi) % math.tau-math.pi
+        emergency_burn = .18 * (abs(keyboard_turn) + abs(keyboard_climb))
+        burn = 0.08 + 0.48 * self.boosting / self.boost_scale + max(0, climb) * 0.06 + emergency_burn
         self.fuel = max(0.0, self.fuel - burn * dt)
-        self.vertical_speed = climb * CLIMB_RATE
+        response_ease = 1-math.exp(-dt*self.climb_response_rate)
+        vertical_change = (climb*self.climb_rate-self.vertical_speed)*response_ease
+        limit = self.vertical_acceleration*dt*max(1,abs(climb_input))
+        self.vertical_speed += float(np.clip(vertical_change,-limit,limit))
+        target_pitch = float(np.clip(math.atan2(self.vertical_speed,max(self.speed,.1)),-.7,.7))
+        self.flight_pitch += (target_pitch-self.flight_pitch)*response_ease
         self.altitude = min(self.altitude + self.vertical_speed * dt, MAX_ALTITUDE)
         self.position += np.array([math.sin(self.heading), math.cos(self.heading)]) * self.speed * dt
         floor = world.obstacle_height(self.position[0], self.position[1])
@@ -372,15 +422,20 @@ class Atmosphere:
         rx, rz = dx[below], dz[below]
         distance = np.maximum(0, (world.raw_terrain_np(camera_x, camera_z) - camera_y) / safe_dy)
         x, z = camera_x + rx * distance, camera_z + rz * distance
-        # Which town each pixel lands in barely changes between iterations, so look it up once.
-        places = world.settlements_np(x, z)
         for _ in range(3):
-            distance = np.maximum(0, (world.ground_height_np(x, z, places) - camera_y) / safe_dy)
+            distance = np.maximum(0, (world.ground_height_np(x, z) - camera_y) / safe_dy)
             x, z = camera_x + rx * distance, camera_z + rz * distance
-        color, lamps = world.land_color_np(x, z, distance, self.ground_mode, night, places)
+        range_metres = distance * np.sqrt(rx * rx + safe_dy * safe_dy + rz * rz)
+        color, lamps = world.land_color_np(x, z, range_metres, self.ground_mode, night)
         daylight = float(smoothstep(-0.12, 0.35, self.sun_direction[1]))
         light = 0.09 + daylight * 0.85
-        ground = color * light * 255 + np.array([255, 184, 97]) * (lamps * 0.9)[..., None]
+        ground = color * light * 255
+        if self.shadow_model is not None:
+            ground *= 1 - self.shadow_model.shadow_at(x,z,self)[...,None]
+        if self.wireframe:
+            edges = np.minimum(np.abs((x + 80) % 160 - 80), np.abs((z + 80) % 160 - 80))
+            line = 1 - smoothstep(0, np.maximum(distance / self.FOCAL, 1.0), edges)
+            ground = np.array([4, 8, 12]) + np.array([60, 205, 155]) * line[..., None]
         haze = smoothstep(2500, 18000, distance)[..., None]
         scene = sky.copy()
         scene[below] = ground * (1 - haze) + sky[below] * haze
@@ -394,6 +449,7 @@ class DisplayControls:
         self.pg = pygame
         self.fullscreen = False
         self.mouse_looking = False
+        self.look_buttons = set()
         self.windowed_size = pygame.display.get_window_size()
 
     def toggle_fullscreen(self):
@@ -409,9 +465,18 @@ class DisplayControls:
 
     def grab_mouse(self, enabled):
         self.mouse_looking = enabled
+        if not enabled:
+            self.look_buttons.clear()
         self.pg.event.set_grab(enabled)
         self.pg.mouse.set_visible(not enabled)
         self.pg.mouse.get_rel()
+
+    def set_look_button(self, button, pressed):
+        if pressed:
+            self.look_buttons.add(button)
+        else:
+            self.look_buttons.discard(button)
+        self.grab_mouse(bool(self.look_buttons))
 
 
 def call_systems(systems, method, *args):
@@ -430,9 +495,8 @@ def call_systems(systems, method, *args):
 
 def build_systems(args):
     from effects import WeatherEffects
-    from life import SkyLife
     from weather import LiveWeather
-    return [LiveWeather(args.city), WeatherEffects(args.seed), SkyLife(args.seed)]
+    return [LiveWeather(args.city), WeatherEffects(args.seed)]
 
 
 def apply_preset(atmosphere, name):
@@ -441,12 +505,15 @@ def apply_preset(atmosphere, name):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description='Plane\u00b2: a flight through a living sky.')
-    parser.add_argument('--mode', choices=['menu', 'free', 'rings', 'courier'], default='menu',
+    parser.add_argument('--mode', choices=['menu', 'free', 'rings'], default='menu',
                         help='Skip the title screen and start a mode')
-    parser.add_argument('--pilot', help='Pilot by name or callsign, e.g. "mei" or "tailwind"')
     parser.add_argument('--headless', action='store_true')
     parser.add_argument('--renderer', choices=['auto', 'gpu', 'cpu'], default='auto')
     parser.add_argument('--fps', type=int, default=60, help='Frame cap. Use 0 for uncapped benchmarking.')
+    parser.add_argument('--wireframe', action='store_true', help='Start with wireframe rendering')
+    parser.add_argument('--plane', choices=['classic','f15'], default=None, help='Aircraft model')
+    parser.add_argument('--connect', help='Join a multiplayer server at HOST:PORT')
+    parser.add_argument('--name', default='Pilot', help='Multiplayer display name')
     parser.add_argument('--frames', type=int, default=0)
     parser.add_argument('--fullscreen', action='store_true')
     parser.add_argument('--mute', action='store_true')
@@ -501,6 +568,17 @@ def open_window(pygame, args):
 
 def main(argv=None):
     args = parse_args(argv)
+    network = None
+    if args.connect:
+        from network import NetworkClient
+        try:
+            network = NetworkClient(args.connect,args.name,args.plane or 'classic')
+        except (OSError,ValueError) as error:
+            raise SystemExit(f'Could not join server: {error}') from error
+        args.seed = network.welcome['seed']
+        args.hour = network.welcome['hour']
+        if args.mode == 'menu':
+            args.mode = 'free'
     use_gpu = args.renderer == 'gpu' or (args.renderer == 'auto' and not args.headless)
     if args.headless and not use_gpu:
         os.environ['SDL_VIDEODRIVER'] = 'dummy'
@@ -508,11 +586,11 @@ def main(argv=None):
         os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')
     os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
     import pygame
-    from audio import Audio
     from game import Game
     import ui
     from ui import Fonts
-    pygame.init()
+    pygame.display.init()
+    pygame.font.init()
     gpu = open_window(pygame, args)
     window = pygame.display.get_surface()
     fonts = Fonts()
@@ -527,15 +605,30 @@ def main(argv=None):
     atmosphere.cover = float(np.clip(args.cover, 0, 1))
     if args.preset:
         apply_preset(atmosphere, args.preset)
-    audio = Audio(pygame, enabled=not args.headless and not args.mute)
-    game = Game(atmosphere, fonts, audio, args.mode, args.pilot, args.seed)
+    audio = None
+    game = Game(atmosphere, fonts, audio, args.mode, args.seed)
+    game.network = network
+    if network:
+        spawn = network.welcome['spawn']
+        atmosphere.position = np.array([spawn['x'],spawn['z']])
+        atmosphere.altitude = spawn['y']
+    game.frame_limit = max(0, args.fps)
+    atmosphere.wireframe = args.wireframe
     if args.altitude is not None:
         atmosphere.altitude = float(np.clip(args.altitude / FEET_PER_METRE, 180, MAX_ALTITUDE))
     systems = build_systems(args)
-    from plane import PlaneModel
-    plane = PlaneModel()
+    from plane import PlaneModel, remote_aircraft_mesh
+    models = {name: PlaneModel(name) for name in ('classic','f15')}
+    if args.plane:
+        atmosphere.plane_id = args.plane
+    plane = models[atmosphere.plane_id]
+    atmosphere.shadow_model = plane
     if gpu:
         gpu.set_plane(plane)
+    from cities import CityScene
+    cities = CityScene()
+    if gpu:
+        gpu.set_cities(cities.batches)
     clock = pygame.time.Clock()
     running, frames = True, 0
     start = time.perf_counter()
@@ -548,7 +641,7 @@ def main(argv=None):
     shade_cache = [None, None]
     presets = {pygame.K_F1: 'clear', pygame.K_F2: 'broken', pygame.K_F3: 'overcast', pygame.K_F4: 'storm'}
     while running:
-        dt = min(clock.tick(max(0, args.fps)) / 1000, 0.15)
+        dt = min(clock.tick(game.frame_limit) / 1000, 0.15)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -572,13 +665,13 @@ def main(argv=None):
                         atmosphere.day_length = max(10, atmosphere.day_length / 2)
                     elif event.key in presets:
                         apply_preset(atmosphere, presets[event.key])
-                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
-                    display_controls.grab_mouse(True)
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button in (1, 3):
+                    display_controls.set_look_button(event.button, True)
                 if event.type == pygame.MOUSEMOTION and display_controls.mouse_looking:
                     atmosphere.mouse_look(event.rel)
                 call_systems(systems, 'handle_event', event, atmosphere)
-            if event.type == pygame.MOUSEBUTTONUP and event.button == 3:
-                display_controls.grab_mouse(False)
+            if event.type == pygame.MOUSEBUTTONUP and event.button in (1, 3):
+                display_controls.set_look_button(event.button, False)
             if event.type == pygame.WINDOWFOCUSLOST:
                 display_controls.grab_mouse(False)
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE and display_controls.mouse_looking:
@@ -590,26 +683,45 @@ def main(argv=None):
         if not game.flying and display_controls.mouse_looking:
             display_controls.grab_mouse(False)
         sim_dt = 0.0 if game.paused else dt
+        if plane.model_id != atmosphere.plane_id:
+            plane = models[atmosphere.plane_id]
+            atmosphere.shadow_model = plane
+            if gpu:
+                gpu.set_plane(plane)
         keys = pygame.key.get_pressed() if game.flying else NoKeys()
+        atmosphere.set_mouse_steering(game.flying and 1 in display_controls.look_buttons)
         atmosphere.update(sim_dt, keys)
         call_systems(systems, 'update', sim_dt, atmosphere)
         game.update(dt, sim_dt)
         atmosphere.sanitize()
+        if network:
+            network.publish(atmosphere)
+            atmosphere.remote_players = network.players()
         width, height = pygame.display.get_window_size()
         # A minimized window can report 0x0; skip drawing rather than scaling to nothing.
         if width > 0 and height > 0:
             atmosphere.aspect = width / height
             shade = game.scene_shade()
+            world_mesh = game.mode.world_mesh(atmosphere) if game.mode and game.mode.key == 'rings' and game.state in ('flying','paused') else None
+            remote_mesh = remote_aircraft_mesh(atmosphere.remote_players,models,atmosphere)
+            if remote_mesh is not None:
+                world_mesh = remote_mesh if world_mesh is None else tuple(
+                    np.concatenate((a,b)) for a,b in zip(world_mesh,remote_mesh))
+            if not gpu:
+                city_mesh = cities.cpu_mesh(atmosphere)
+                if city_mesh is not None:
+                    world_mesh = city_mesh if world_mesh is None else tuple(
+                        np.concatenate((a,b)) for a,b in zip(world_mesh,city_mesh))
             if gpu:
-                if not args.headless and args.fps > 0:
-                    gpu.adapt(clock.get_fps(), dt)
-                gpu.render(atmosphere, (width, height))
+                if not args.headless and game.frame_limit > 0:
+                    gpu.adapt(clock.get_fps(), dt, game.frame_limit)
+                gpu.render(atmosphere, (width, height), world_mesh)
                 gpu.draw_shade(*shade)
             else:
                 window = pygame.display.get_surface()
                 view = atmosphere.render()
                 pygame.transform.smoothscale(view, (width, height), window)
-                plane.draw_world(window, atmosphere)
+                plane.draw_world(window, atmosphere, world_mesh)
                 key = ((width, height), shade)
                 if shade_cache[0] != key:
                     shade_cache[:] = [key, ui.scene_shade((width, height), *shade)]
@@ -625,21 +737,22 @@ def main(argv=None):
                 overlay = pygame.Surface((width, height), pygame.SRCALPHA)
             overlay.fill((0, 0, 0, 0))
             call_systems(systems, 'draw_world', overlay, atmosphere)
-            game.draw_world(overlay)
-            # Composite in premultiplied alpha so scaled text keeps clean edges at any window size.
-            composite = overlay.premul_alpha()
-            scaled_hud = hud.premul_alpha()
-            if hud_size != (1280, 720):
-                scaled_hud = pygame.transform.smoothscale(scaled_hud, hud_size)
-            composite.blit(scaled_hud, offset, special_flags=pygame.BLEND_PREMULTIPLIED)
             if gpu:
-                gpu.draw_hud(composite)
+                gpu.draw_hud(overlay)
+                gpu.draw_hud(hud, (offset[0], height - offset[1] - hud_size[1], *hud_size))
             else:
+                composite = overlay.premul_alpha()
+                scaled_hud = hud.premul_alpha()
+                if hud_size != (1280, 720):
+                    scaled_hud = pygame.transform.smoothscale(scaled_hud, hud_size)
+                composite.blit(scaled_hud, offset, special_flags=pygame.BLEND_PREMULTIPLIED)
                 window.blit(composite, (0, 0), special_flags=pygame.BLEND_PREMULTIPLIED)
             if args.screenshot and ((args.frames and frames + 1 >= args.frames) or not running):
                 captured = gpu.screenshot((width, height)) if gpu else window.copy()
         atmosphere.events.clear()
-        pygame.display.flip()
+        # Offscreen GPU runs render to an FBO, so a hidden-window swap only adds driver throttling.
+        if not (args.headless and gpu):
+            pygame.display.flip()
         frames += 1
         if args.frames and frames >= args.frames:
             running = False
@@ -651,7 +764,8 @@ def main(argv=None):
     duration = max(time.perf_counter() - start, 1e-6)
     print(f'{frames} frames in {duration:.2f}s ({frames / duration:.1f} FPS average)')
     call_systems(systems, 'close')
-    audio.close()
+    if network:
+        network.close()
     display_controls.grab_mouse(False)
     if gpu:
         gpu.close()
