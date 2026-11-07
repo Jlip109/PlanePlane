@@ -6,6 +6,8 @@ from pathlib import Path
 import moderngl
 import numpy as np
 
+from camera import view_angles
+
 
 VERTEX_SHADER = """
 #version 330
@@ -32,6 +34,8 @@ uniform float pitch;
 uniform float phase;
 uniform float cover;
 uniform vec3 sun_direction;
+uniform vec3 moon_direction;
+uniform float time;
 uniform vec3 ground_color;
 uniform vec4 layers[4]; // elevation, opacity, wind multiplier, texture offset
 
@@ -60,6 +64,18 @@ void main() {
     vec3 sun_color = vec3(1.0, (205.0 + 45.0 * max(0.0, sun_direction.y)) / 255.0,
         (125.0 + 110.0 * max(0.0, sun_direction.y)) / 255.0);
     sky = mix(sky, sun_color, disk * visibility) + sun_color * glow * visibility;
+
+    // Moon opposite the sun, plus hashed stars; both must match star_field() in main.py.
+    float night_sky = smoothstep(0.55, 1.0, phase);
+    if (night_sky > 0.0) {
+        float moon = smoothstep(cos(0.022), cos(0.017), dot(direction, moon_direction)) * night_sky * (1.0 - cover * 0.6);
+        sky = mix(sky, vec3(226.0, 232.0, 240.0) / 255.0, moon);
+        vec2 cell = floor(vec2(atan(direction.z, direction.x), asin(clamp(direction.y, -1.0, 1.0))) * 180.0);
+        float hashed = fract(sin(cell.x * 12.9898 + cell.y * 78.233) * 43758.5453);
+        float twinkle = 0.75 + 0.25 * sin(time * 3.0 + hashed * 400.0);
+        sky += step(0.996, hashed) * smoothstep(0.0, 0.12, direction.y) * twinkle * night_sky
+            * (1.0 - cover * 0.9) * 230.0 / 255.0;
+    }
 
     // Intersect the terrain height field, then draw antialiased world-space grid lines.
     if (dy < -0.008) {
@@ -148,14 +164,14 @@ class GPURenderer:
         self.context.disable(moderngl.BLEND)
         self.cloud.use(0)
         self.palette.use(1)
-        shake = math.sin(atmosphere.elapsed * 9) * atmosphere.wind * atmosphere.cover * 0.00012
-        shake *= 1 + atmosphere.risk / 100
+        heading, pitch = view_angles(atmosphere)
         uniforms = {
             'resolution': size, 'position': tuple(atmosphere.position),
             'drift': tuple(atmosphere.drift), 'altitude': atmosphere.altitude,
-            'heading': atmosphere.heading + atmosphere.look_yaw, 'pitch': atmosphere.pitch + shake,
+            'heading': heading, 'pitch': pitch, 'time': atmosphere.elapsed,
             'phase': atmosphere.phase, 'cover': atmosphere.cover,
-            'sun_direction': tuple(atmosphere.sun_direction), 'ground_color': atmosphere.ground_color,
+            'sun_direction': tuple(atmosphere.sun_direction), 'moon_direction': tuple(atmosphere.moon_direction),
+            'ground_color': atmosphere.ground_color,
         }
         for name, value in uniforms.items():
             self.program[name].value = value

@@ -5,13 +5,43 @@ import math
 import os
 from pathlib import Path
 import time
+import traceback
 
 import numpy as np
+
+from camera import terrain_height, view_angles
+
+PRESETS = {  # cover, wind, precipitation, storm
+    'clear': (0.18, 5, 0.0, 0.0),
+    'broken': (0.58, 12, 0.0, 0.0),
+    'overcast': (0.92, 29, 0.45, 0.0),
+    'storm': (0.97, 38, 1.0, 1.0),
+}
 
 
 def smoothstep(low, high, value):
     value = np.clip((value - low) / (high - low), 0, 1)
     return value * value * (3 - 2 * value)
+
+
+def finite(text):
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'{text!r} is not a number') from None
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f'{text!r} is not a finite number')
+    return value
+
+
+def star_field(dx, dy, dz, ray_length, night, cover, t):
+    # Hash the ray direction into small angular cells; a few cells become stars.
+    azimuth = np.arctan2(dz, dx)
+    elevation = np.arcsin(np.clip(dy / ray_length, -1, 1))
+    cell_x, cell_y = np.floor(azimuth * 180), np.floor(elevation * 180)
+    hashed = np.mod(np.sin(cell_x * 12.9898 + cell_y * 78.233) * 43758.5453, 1)
+    twinkle = 0.75 + 0.25 * np.sin(t * 3 + hashed * 400)
+    return (hashed > 0.996) * smoothstep(0.0, 0.12, dy / ray_length) * twinkle * night * (1 - cover * 0.9)
 
 
 class Atmosphere:
@@ -46,6 +76,24 @@ class Atmosphere:
         self.speed = 75.0
         self.risk = 0.0
         self.drift = np.zeros(2)
+        self.precipitation = 0.0
+        self.storm = 0.0
+        self.flash = 0.0
+        self.weather_label = 'SIMULATED WEATHER'
+        self.defaults = {name: value for name, value in vars(self).items() if isinstance(value, float)}
+
+    def sanitize(self):
+        # Never let NaN/inf reach the renderers; a bad value resets to its starting default.
+        for name, default in self.defaults.items():
+            if not math.isfinite(getattr(self, name)):
+                setattr(self, name, default)
+        for name in ('position', 'drift'):
+            if not np.all(np.isfinite(getattr(self, name))):
+                setattr(self, name, np.zeros(2))
+
+    @property
+    def moon_direction(self):
+        return -self.sun_direction
 
     @property
     def sun_direction(self):
@@ -78,6 +126,7 @@ class Atmosphere:
 
     def update(self, dt, keys):
         pg = self.pg
+        dt = min(max(dt, 0.0), 0.15) if math.isfinite(dt) else 0.0
         self.elapsed += dt
         self.heading += (keys[pg.K_d] - keys[pg.K_a]) * dt * 0.55
         self.pitch = float(np.clip(self.pitch + (keys[pg.K_UP] - keys[pg.K_DOWN]) * dt * 0.35, -1.5, 1.5))
@@ -89,16 +138,21 @@ class Atmosphere:
         self.wind = float(np.clip(self.wind + (keys[pg.K_PERIOD] - keys[pg.K_COMMA]) * dt * 9, 0, 45))
         self.position += np.array([math.sin(self.heading), math.cos(self.heading)]) * self.speed * dt
         self.drift += np.array([math.sin(self.wind_angle), math.cos(self.wind_angle)]) * self.wind * dt
+        # Hills reach 230 m, above the old 180 m floor, so keep the plane clear of the terrain.
+        floor = terrain_height(self.position[0], self.position[1]) + 40
+        self.altitude = max(self.altitude, floor)
         # An intentionally game-like exposure metric, not an aviation model.
         self.risk = float(np.clip(max(0, self.altitude - 1800) / 3700 * 68 + self.wind / 45 * 32, 0, 100))
+        self.sanitize()
 
     def render(self):
+        return self.pg.surfarray.make_surface(np.transpose(self.render_array().astype(np.uint8), (1, 0, 2)))
+
+    def render_array(self):
         t = self.elapsed
-        shake = math.sin(t * 9) * self.wind * self.cover * 0.00012 * (1 + self.risk / 100)
-        pitch = self.pitch + shake
+        heading, pitch = view_angles(self)
         dy = self.sy * math.cos(pitch) + math.sin(pitch)
         forward = math.cos(pitch) - self.sy * math.sin(pitch)
-        heading = self.heading + self.look_yaw
         sx = self.sx * self.aspect / (16 / 9)
         dx = sx * math.cos(heading) + forward * math.sin(heading)
         dz = forward * math.cos(heading) - sx * math.sin(heading)
@@ -124,6 +178,13 @@ class Atmosphere:
         visibility = float(smoothstep(-0.035, 0.02, sun[1]))
         sun_color = np.array([255, 205 + 45 * max(0, sun[1]), 125 + 110 * max(0, sun[1])])
         sky = sky * (1 - disk[..., None] * visibility) + sun_color * (disk + glow)[..., None] * visibility
+        night = float(smoothstep(0.55, 1.0, self.phase))
+        if night > 0:
+            moon = self.moon_direction
+            moon_alignment = (dx * moon[0] + dy * moon[1] + dz * moon[2]) / ray_length
+            moon_disk = smoothstep(math.cos(0.022), math.cos(0.017), moon_alignment) * night * (1 - self.cover * 0.6)
+            sky = sky * (1 - moon_disk[..., None]) + np.array([226, 232, 240]) * moon_disk[..., None]
+            sky = sky + star_field(dx, dy, dz, ray_length, night, self.cover, t)[..., None] * 230
         scene = self.draw_ground(sky, dx, dy, dz)
 
         layers = [(850, 0.52, 0.85, 24), (1450, 0.43, 1.0, 97),
@@ -151,7 +212,7 @@ class Atmosphere:
             # Thin volume around each plane prevents a hard cut while crossing it.
             fog = math.exp(-(delta / 95) ** 2) * self.cover * opacity * 0.75
             scene = scene * (1 - fog) + cloud_color * fog
-        return self.pg.surfarray.make_surface(np.transpose(np.clip(scene, 0, 255).astype(np.uint8), (1, 0, 2)))
+        return np.clip(np.nan_to_num(scene), 0, 255)
 
     def draw_ground(self, sky, dx, dy, dz):
         safe_dy = np.minimum(dy, -0.008)
@@ -205,7 +266,9 @@ def draw_hud(pg, surface, atmosphere, fonts, renderer, fps):
     minutes = int(atmosphere.hour * 60) % 1440
     clock_text = f'{minutes // 60:02d}:{minutes % 60:02d}'
     cycle_text = 'PAUSED' if atmosphere.cycle_paused else f'{atmosphere.day_length:g}S / DAY'
-    subtitle = f'SIMULATED WEATHER    /    {clock_text}    /    {cycle_text}'
+    if not atmosphere.cycle_paused and atmosphere.day_length >= 86400:
+        cycle_text = 'REAL TIME'
+    subtitle = f'{atmosphere.weather_label}    /    {clock_text}    /    {cycle_text}'
     surface.blit(small.render(subtitle, True, (143, 184, 187)), (29, 58))
     stats = f'{atmosphere.altitude:04.0f} M   |   WIND {atmosphere.wind:02.0f} M/S   |   COVER {atmosphere.cover:.0%}'
     surface.blit(font.render(stats, True, ink), (715, 24))
@@ -218,15 +281,40 @@ def draw_hud(pg, surface, atmosphere, fonts, renderer, fps):
     pg.draw.rect(surface, (8, 20, 29, 205), (0, 626, 1280, 94))
     ground_name = ['GREEN', 'YELLOW', 'WHITE'][atmosphere.ground_mode]
     lines = [
-        'W/S altitude   A/D heading   Hold RIGHT MOUSE to look   R center view   UP/DOWN look',
-        'F11 or ALT+ENTER fullscreen   LEFT/RIGHT time   P pause cycle   [/] cycle speed',
-        f'1 clear   2 broken cloud   3 overcast   ,/. wind   G ground ({ground_name})   ESC release / exit',
+        'W/S altitude   A/D heading   Hold RIGHT MOUSE to look   R center view   UP/DOWN look   N ring run',
+        'F11 or ALT+ENTER fullscreen   LEFT/RIGHT time   P pause cycle   [/] cycle speed   L live weather',
+        f'1 clear   2 broken   3 overcast   4 storm   ,/. wind   G ground ({ground_name})   ESC release / exit',
     ]
     for row, text in enumerate(lines):
         surface.blit(small.render(text, True, ink), (28, 642 + row * 24))
 
 
-def main():
+def call_systems(systems, method, *args):
+    for system in systems:
+        handler = getattr(system, method, None)
+        if handler is None:
+            continue
+        try:
+            handler(*args)
+        except Exception:
+            # One broken feature shouldn't take the whole flight down; report it and switch it off.
+            print(f'{type(system).__name__}.{method} failed and was disabled:')
+            traceback.print_exc()
+            setattr(system, method, None)
+
+
+def build_systems(args):
+    from effects import WeatherEffects
+    from game import RingRun
+    from weather import LiveWeather
+    return [LiveWeather(args.city), WeatherEffects(args.seed), RingRun(args.seed, args.game)]
+
+
+def apply_preset(atmosphere, name):
+    atmosphere.cover, atmosphere.wind, atmosphere.precipitation, atmosphere.storm = PRESETS[name]
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--headless', action='store_true')
     parser.add_argument('--renderer', choices=['auto', 'gpu', 'cpu'], default='auto')
@@ -234,13 +322,21 @@ def main():
     parser.add_argument('--frames', type=int, default=0)
     parser.add_argument('--fullscreen', action='store_true')
     parser.add_argument('--screenshot', type=Path)
-    parser.add_argument('--altitude', type=float, default=1250)
-    parser.add_argument('--time', type=float, default=None, help='Legacy palette position, 0 day to 1 night')
-    parser.add_argument('--hour', type=float, default=9.0, help='Starting hour in the 24-hour cycle')
-    parser.add_argument('--day-length', type=float, default=240.0, help='Real seconds per simulated 24 hours')
+    parser.add_argument('--altitude', type=finite, default=1250)
+    parser.add_argument('--time', type=finite, default=None, help='Legacy palette position, 0 day to 1 night')
+    parser.add_argument('--hour', type=finite, default=9.0, help='Starting hour in the 24-hour cycle')
+    parser.add_argument('--day-length', type=finite, default=240.0, help='Real seconds per simulated 24 hours')
     parser.add_argument('--ground', choices=['green', 'yellow', 'white'], default='green')
-    parser.add_argument('--cover', type=float, default=0.58)
-    args = parser.parse_args()
+    parser.add_argument('--cover', type=finite, default=0.58)
+    parser.add_argument('--preset', choices=list(PRESETS), help='Starting weather (overrides --cover)')
+    parser.add_argument('--city', help='Start with live weather for a city, e.g. "Troy, NY"')
+    parser.add_argument('--game', action='store_true', help='Start a ring run right away')
+    parser.add_argument('--seed', type=int, default=None, help='Seed for rings and lightning')
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
     use_gpu = args.renderer == 'gpu' or (args.renderer == 'auto' and not args.headless)
     if args.headless and not use_gpu:
         os.environ['SDL_VIDEODRIVER'] = 'dummy'
@@ -271,15 +367,19 @@ def main():
     font = pygame.font.SysFont('consolas', 18)
     small = pygame.font.SysFont('consolas', 14)
     title = pygame.font.SysFont('consolas', 27, bold=True)
+    fonts = (font, small, title)
     atmosphere = Atmosphere(pygame)
     atmosphere.altitude = float(np.clip(args.altitude, 180, 5500))
     atmosphere.hour = args.hour % 24
     if args.time is not None:
         atmosphere.hour = (12 + float(np.clip(args.time, 0, 1)) * 12) % 24
-    atmosphere.day_length = max(1.0, args.day_length)
+    atmosphere.day_length = float(np.clip(args.day_length, 1.0, 86400))
     atmosphere.ground_mode = ['green', 'yellow', 'white'].index(args.ground)
     atmosphere.update_lighting()
     atmosphere.cover = float(np.clip(args.cover, 0, 1))
+    if args.preset:
+        apply_preset(atmosphere, args.preset)
+    systems = build_systems(args)
     clock = pygame.time.Clock()
     running, frames = True, 0
     start = time.perf_counter()
@@ -312,10 +412,9 @@ def main():
                     atmosphere.day_length = min(86400, atmosphere.day_length * 2)
                 if event.key == pygame.K_RIGHTBRACKET:
                     atmosphere.day_length = max(10, atmosphere.day_length / 2)
-                if event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
-                    atmosphere.cover, atmosphere.wind = {
-                        pygame.K_1: (0.18, 5), pygame.K_2: (0.58, 12), pygame.K_3: (0.92, 29)
-                    }[event.key]
+                presets = {pygame.K_1: 'clear', pygame.K_2: 'broken', pygame.K_3: 'overcast', pygame.K_4: 'storm'}
+                if event.key in presets:
+                    apply_preset(atmosphere, presets[event.key])
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
                 display_controls.grab_mouse(True)
             if event.type == pygame.MOUSEBUTTONUP and event.button == 3:
@@ -324,30 +423,36 @@ def main():
                 atmosphere.mouse_look(event.rel)
             if event.type == pygame.WINDOWFOCUSLOST:
                 display_controls.grab_mouse(False)
+            call_systems(systems, 'handle_event', event, atmosphere)
         atmosphere.update(dt, pygame.key.get_pressed())
+        call_systems(systems, 'update', dt, atmosphere)
+        atmosphere.sanitize()
         width, height = pygame.display.get_window_size()
-        atmosphere.aspect = width / max(1, height)
-        if gpu:
-            gpu.render(atmosphere, (width, height))
-        else:
-            window = pygame.display.get_surface()
-            view = atmosphere.render()
-            pygame.transform.smoothscale(view, (width, height), window)
-        draw_hud(pygame, hud, atmosphere, (font, small, title),
-                 'GPU' if gpu else 'CPU', clock.get_fps())
-        scale = min(width / 1280, height / 720)
-        hud_size = (max(1, round(1280 * scale)), max(1, round(720 * scale)))
-        if overlay.get_size() != (width, height):
-            overlay = pygame.Surface((width, height), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 0))
-        scaled_hud = pygame.transform.smoothscale(hud, hud_size)
-        overlay.blit(scaled_hud, ((width - hud_size[0]) // 2, (height - hud_size[1]) // 2))
-        if gpu:
-            gpu.draw_hud(overlay)
-        else:
-            window.blit(overlay, (0, 0))
-        if args.screenshot and ((args.frames and frames + 1 >= args.frames) or not running):
-            captured = gpu.screenshot((width, height)) if gpu else window.copy()
+        # A minimized window can report 0x0; skip drawing rather than scaling to nothing.
+        if width > 0 and height > 0:
+            atmosphere.aspect = width / height
+            if gpu:
+                gpu.render(atmosphere, (width, height))
+            else:
+                window = pygame.display.get_surface()
+                view = atmosphere.render()
+                pygame.transform.smoothscale(view, (width, height), window)
+            draw_hud(pygame, hud, atmosphere, fonts, 'GPU' if gpu else 'CPU', clock.get_fps())
+            call_systems(systems, 'draw_hud', hud, atmosphere, fonts)
+            scale = min(width / 1280, height / 720)
+            hud_size = (max(1, round(1280 * scale)), max(1, round(720 * scale)))
+            if overlay.get_size() != (width, height):
+                overlay = pygame.Surface((width, height), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 0))
+            call_systems(systems, 'draw_world', overlay, atmosphere)
+            scaled_hud = pygame.transform.smoothscale(hud, hud_size)
+            overlay.blit(scaled_hud, ((width - hud_size[0]) // 2, (height - hud_size[1]) // 2))
+            if gpu:
+                gpu.draw_hud(overlay)
+            else:
+                window.blit(overlay, (0, 0))
+            if args.screenshot and ((args.frames and frames + 1 >= args.frames) or not running):
+                captured = gpu.screenshot((width, height)) if gpu else window.copy()
         pygame.display.flip()
         frames += 1
         if args.frames and frames >= args.frames:
@@ -357,8 +462,9 @@ def main():
         pygame.image.save(captured if captured is not None else window, args.screenshot)
     if gpu:
         gpu.context.finish()
-    duration = time.perf_counter() - start
+    duration = max(time.perf_counter() - start, 1e-6)
     print(f'{frames} frames in {duration:.2f}s ({frames / duration:.1f} FPS average)')
+    call_systems(systems, 'close')
     display_controls.grab_mouse(False)
     if gpu:
         gpu.close()
