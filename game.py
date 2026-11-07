@@ -1,137 +1,195 @@
-"""Ring run: fly through as many rings as you can before the clock runs out."""
+"""The game director: menus, the active mode, radio, HUD, scores and sound in one state machine.
 
-import math
+States: title -> (pilots | controls) -> flying <-> paused -> results -> title
+"""
 
 import numpy as np
 import pygame
 
-from camera import SCREEN_SCALE, project, view_angles
+import characters
+import world
+from characters import Radio
+from hud import Hud
+from menu import Menu
+from modes import FreeFlight, RingRun, SkyCourier
+from scores import Scores
 
-RADIUS = 120.0
-SPACING = 800.0
-START_TIME = 25.0
-BONUS = 12.0
-AHEAD = 3
+START = {'position': (0.0, -900.0), 'altitude': 700.0, 'heading': 0.0}
+MENU_STATES = ('title', 'pilots', 'controls')
 
 
-class RingRun:
-    help = 'N start/stop ring run'
+class Game:
+    def __init__(self, atmosphere, fonts, audio, mode='menu', pilot=None, seed=None, scores=None):
+        self.atmosphere = atmosphere
+        self.fonts = fonts
+        self.audio = audio
+        self.scores = scores if scores is not None else Scores()
+        self.radio = Radio()
+        self.hud = Hud(fonts)
+        self.modes = {'free': FreeFlight(self), 'rings': RingRun(self, seed), 'courier': SkyCourier(self, seed)}
+        self.mode = None
+        self.pilot_index = self.pick_pilot(pilot)
+        self.apply_pilot()
+        self.hud_transform = (1.0, 0, 0)
+        self.menu = Menu(self, fonts)
+        self.state = 'title'
+        self.quit_requested = False
+        self.city = None
+        if mode in self.modes:
+            self.start(mode)
+        else:
+            atmosphere.autopilot = True
 
-    def __init__(self, seed=None, start_now=False):
-        self.rng = np.random.default_rng(seed)
-        self.start_now = start_now
-        self.active = False
-        self.rings = []
-        self.cursor = None
-        self.score = 0
-        self.best = 0
-        self.time_left = 0.0
-        self.message = ''
-        self.message_time = 0.0
+    # ------------------------------------------------------------------ helpers
 
-    def start(self, atmosphere):
-        self.active = True
-        self.score = 0
-        self.time_left = START_TIME
-        self.rings = []
-        self.cursor = (atmosphere.position[0], atmosphere.altitude, atmosphere.position[1], atmosphere.heading)
-        for _ in range(AHEAD):
-            self.add_ring()
-        self.show('FLY THROUGH THE RINGS', 2.5)
+    def pick_pilot(self, wanted):
+        if wanted is not None:
+            for index, pilot in enumerate(characters.PILOTS):
+                if str(wanted).lower() in (str(index), pilot.role.lower(), pilot.name.split()[0].lower()):
+                    return index
+        saved = self.scores.get('pilot', 0)
+        return saved if 0 <= saved < len(characters.PILOTS) else 0
 
-    def add_ring(self):
-        x, y, z, heading = self.cursor
-        heading += self.rng.uniform(-0.45, 0.45)
-        x += math.sin(heading) * SPACING
-        z += math.cos(heading) * SPACING
-        y = float(np.clip(y + self.rng.uniform(-220, 220), 450, 3800))
-        self.cursor = (x, y, z, heading)
-        self.rings.append((x, y, z, math.sin(heading), math.cos(heading)))
+    def apply_pilot(self):
+        pilot = characters.PILOTS[self.pilot_index]
+        self.atmosphere.speed_scale = pilot.speed
+        self.atmosphere.handling = pilot.handling
+        self.atmosphere.boost_scale = pilot.boost
 
-    def next_ring(self):
-        self.rings.pop(0)
-        self.add_ring()
+    @property
+    def pilot(self):
+        return characters.PILOTS[self.pilot_index]
 
-    def show(self, text, seconds):
-        self.message, self.message_time = text, seconds
+    @property
+    def flying(self):
+        return self.state == 'flying'
 
-    def handle_event(self, event, atmosphere):
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_n:
-            if self.active:
-                self.active = False
-                self.show('RUN STOPPED', 2)
-            else:
-                self.start(atmosphere)
+    @property
+    def paused(self):
+        return self.state == 'paused'
 
-    def update(self, dt, atmosphere):
-        if self.start_now:
-            self.start_now = False
-            self.start(atmosphere)
-        self.message_time = max(0.0, self.message_time - dt)
-        if not self.active:
+    def sound(self, name):
+        if self.audio:
+            self.audio.play(name)
+
+    def flash(self, message, color):
+        self.hud.flash_text(message, color)
+
+    # ------------------------------------------------------------------ flow
+
+    def reset_flight(self):
+        atmosphere = self.atmosphere
+        atmosphere.position = np.array(START['position'])
+        atmosphere.altitude = START['altitude']
+        atmosphere.heading = START['heading']
+        atmosphere.speed = 75.0 * atmosphere.speed_scale
+        atmosphere.vertical_speed = atmosphere.turn_rate = atmosphere.bank = atmosphere.flight_pitch = 0.0
+        atmosphere.crash_timer = atmosphere.impact = 0.0
+        atmosphere.boost = 1.0
+        atmosphere.reset_view()
+
+    def start(self, key):
+        self.mode = self.modes[key]
+        self.atmosphere.autopilot = False
+        self.reset_flight()
+        self.radio.clear()
+        self.hud.show_help = False
+        self.city = None
+        self.state = 'flying'
+        self.mode.start(self.atmosphere)
+        self.sound('start')
+
+    def to_title(self):
+        self.state = 'title'
+        self.mode = None
+        self.radio.clear()
+        self.atmosphere.autopilot = True
+        self.menu.age = 0.0
+
+    def act(self, action):
+        if action is None:
             return
-        self.time_left -= dt
-        x, y, z, nx, nz = self.rings[0]
-        rx, ry, rz = atmosphere.position[0] - x, atmosphere.altitude - y, atmosphere.position[1] - z
-        if rx * rx + ry * ry + rz * rz < RADIUS * RADIUS:
-            self.score += 1
-            self.time_left += BONUS
-            self.next_ring()
-            self.show(f'+{BONUS:.0f}s', 1)
-        elif rx * nx + rz * nz > 150:
-            self.next_ring()
-            self.show('MISSED', 1)
-        if self.time_left <= 0:
-            self.active = False
-            self.best = max(self.best, self.score)
-            self.show(f'RUN OVER  /  {self.score} RINGS  /  N TO RETRY', 6)
+        if action in self.modes:
+            self.start(action)
+        elif action == 'pilot':
+            self.menu.pilot_choice = self.pilot_index
+            self.state = 'pilots'
+        elif action == 'pilot_chosen':
+            self.pilot_index = self.menu.pilot_choice
+            self.scores.data['pilot'] = self.pilot_index
+            self.scores.save()
+            self.apply_pilot()
+            self.state = 'title'
+        elif action == 'controls':
+            self.state = 'controls'
+        elif action == 'title':
+            self.to_title()
+        elif action == 'resume':
+            self.state = 'flying'
+        elif action == 'restart':
+            self.start(self.mode.key if self.mode else 'free')
+        elif action == 'quit':
+            self.quit_requested = True
 
-    def draw_world(self, surface, atmosphere):
-        if not self.active:
+    def handle_event(self, event):
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_m:
+            if self.audio:
+                self.audio.toggle_mute()
             return
-        size = surface.get_size()
-        k = size[1] * SCREEN_SCALE
-        visible = False
-        for index in reversed(range(len(self.rings))):
-            x, y, z, nx, nz = self.rings[index]
-            point = project(atmosphere, (x, y, z), size)
-            if point is None:
-                continue
-            sx, sy, depth = point
-            radius = RADIUS * k / depth
-            if radius < 2 or radius > 4 * size[0]:
-                continue
-            # Rings face their flight direction, so they look narrower when seen from the side.
-            rx, ry, rz = x - atmosphere.position[0], y - atmosphere.altitude, z - atmosphere.position[1]
-            facing = abs(rx * nx + rz * nz) / max(1.0, math.sqrt(rx * rx + ry * ry + rz * rz))
-            half_width = radius * max(facing, 0.15)
-            rect = pygame.Rect(0, 0, max(2, int(2 * half_width)), max(2, int(2 * radius)))
-            rect.center = (int(sx), int(sy))
-            color = (255, 196, 92, 235) if index == 0 else (255, 255, 255, 110)
-            pygame.draw.ellipse(surface, color, rect, max(2, int(radius * 0.08)))
-            if index == 0 and 0 <= sx <= size[0] and 0 <= sy <= size[1]:
-                visible = True
-        if not visible:
-            self.draw_pointer(surface, atmosphere)
+        if self.state == 'flying':
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    if self.hud.show_help:
+                        self.hud.show_help = False
+                    else:
+                        self.state = 'paused'
+                        self.menu.pause_index = 0
+                elif event.key == pygame.K_h:
+                    self.hud.show_help = not self.hud.show_help
+            return
+        self.act(self.menu.handle_event(event, self.state))
 
-    def draw_pointer(self, surface, atmosphere):
-        x, _, z, _, _ = self.rings[0]
-        heading, _ = view_angles(atmosphere)
-        bearing = math.atan2(x - atmosphere.position[0], z - atmosphere.position[1]) - heading
-        side = 1 if math.sin(bearing) > 0 else -1
-        width, height = surface.get_size()
-        tip_x = width - 30 if side > 0 else 30
-        points = [(tip_x, height // 2), (tip_x - side * 26, height // 2 - 18), (tip_x - side * 26, height // 2 + 18)]
-        pygame.draw.polygon(surface, (255, 196, 92, 235), points)
+    def update(self, dt, sim_dt):
+        atmosphere = self.atmosphere
+        self.menu.update(dt)
+        self.hud.update(sim_dt)
+        self.radio.update(sim_dt)
+        if self.audio:
+            self.audio.update(dt, atmosphere, self.flying)
+        if self.state != 'flying' or not self.mode:
+            return
+        for name, _ in atmosphere.events:
+            if name == 'crash':
+                self.mode.on_crash(atmosphere)
+        city = world.city_at(atmosphere.position[0], atmosphere.position[1])
+        if city is not None and city != self.city:
+            self.hud.city_banner(city)
+        self.city = city
+        self.mode.update(sim_dt, atmosphere)
+        if self.mode.finished:
+            self.state = 'results'
+            self.radio.clear()
+            self.sound('record' if self.mode.summary and self.mode.summary['record'] else 'deliver')
 
-    def draw_hud(self, surface, atmosphere, fonts):
-        font, _, title = fonts
-        if self.active:
-            x, y, z, _, _ = self.rings[0]
-            distance = math.dist((x, y, z), (atmosphere.position[0], atmosphere.altitude, atmosphere.position[1]))
-            text = f'RINGS {self.score}   TIME {max(0.0, self.time_left):04.1f}S   NEXT {distance:4.0f} M   BEST {self.best}'
-            label = font.render(text, True, (255, 214, 140))
-            surface.blit(label, (640 - label.get_width() // 2, 112))
-        if self.message_time > 0:
-            label = title.render(self.message, True, (255, 236, 200))
-            surface.blit(label, (640 - label.get_width() // 2, 150))
+    # ------------------------------------------------------------------ drawing
+
+    def scene_shade(self):
+        """(top, bottom, left) darkening of the 3D scene behind the HUD or menus."""
+        if self.state in MENU_STATES:
+            return 0.25, 0.35, 0.68
+        return 0.62, 0.5, 0.0
+
+    def draw_world(self, surface):
+        if self.mode and self.state in ('flying', 'paused'):
+            self.mode.draw_world(surface, self.atmosphere)
+
+    def draw_hud(self, surface, fps, renderer):
+        if self.state in MENU_STATES:
+            self.menu.draw(surface, self.state)
+            return
+        self.hud.draw(surface, self.atmosphere, self, fps, renderer)
+        if self.mode:
+            self.mode.draw_hud(surface, self.atmosphere, self.fonts)
+        self.radio.draw(surface, self.fonts)
+        if self.state in ('paused', 'results'):
+            self.menu.draw(surface, self.state)

@@ -40,6 +40,7 @@ class WeatherEffects:
             self.next_strike -= dt * atmosphere.storm
             if self.next_strike <= 0:
                 atmosphere.flash = 1.0
+                atmosphere.emit('lightning')
                 self.echo = 0.12  # real strikes often flicker twice
                 self.next_strike = 2.5 + self.rng.random() * 6
 
