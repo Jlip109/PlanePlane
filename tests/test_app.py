@@ -50,13 +50,16 @@ def test_cpu_app_runs(extra, tmp_path):
     assert 'disabled' not in result.stdout
 
 
-def test_gpu_app_runs():
+def test_gpu_app_runs(tmp_path):
+    shot = tmp_path / 'gpu.png'
     result = run_cli('--headless', '--renderer', 'gpu', '--frames', '8', '--fps', '0', '--seed', '1',
-                     '--preset', 'storm', '--game', gpu=True)
+                     '--preset', 'storm', '--game', '--screenshot', str(shot), gpu=True)
     if result.returncode != 0 and 'GPU initialization failed' in result.stderr:
         pytest.skip('no OpenGL 3.3 context available')
     assert result.returncode == 0, result.stderr
     assert 'disabled' not in result.stdout
+    pixels = pygame.surfarray.array3d(pygame.image.load(shot))
+    assert pixels.mean() > 5 and pixels.std() > 5  # Catch a colour mask left off by the aircraft depth pass.
 
 
 def test_sanitize_restores_bad_values(atmosphere):

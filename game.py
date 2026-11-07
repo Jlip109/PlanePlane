@@ -6,6 +6,7 @@ import numpy as np
 import pygame
 
 from camera import SCREEN_SCALE, project, view_angles
+from units import FEET_PER_METRE
 
 RADIUS = 120.0
 SPACING = 800.0
@@ -129,7 +130,7 @@ class RingRun:
         if self.active:
             x, y, z, _, _ = self.rings[0]
             distance = math.dist((x, y, z), (atmosphere.position[0], atmosphere.altitude, atmosphere.position[1]))
-            text = f'RINGS {self.score}   TIME {max(0.0, self.time_left):04.1f}S   NEXT {distance:4.0f} M   BEST {self.best}'
+            text = f'RINGS {self.score}   TIME {max(0.0, self.time_left):04.1f}S   NEXT {distance * FEET_PER_METRE:4.0f} FT   BEST {self.best}'
             label = font.render(text, True, (255, 214, 140))
             surface.blit(label, (640 - label.get_width() // 2, 112))
         if self.message_time > 0:

@@ -9,7 +9,8 @@ import traceback
 
 import numpy as np
 
-from camera import terrain_height, view_angles
+from camera import terrain_height, view_angles, view_origin
+from units import FEET_PER_METRE, MPH_PER_MPS
 
 PRESETS = {  # cover, wind, precipitation, storm
     'clear': (0.18, 5, 0.0, 0.0),
@@ -38,16 +39,22 @@ def star_field(dx, dy, dz, ray_length, night, cover, t):
     # Hash the ray direction into small angular cells; a few cells become stars.
     azimuth = np.arctan2(dz, dx)
     elevation = np.arcsin(np.clip(dy / ray_length, -1, 1))
-    cell_x, cell_y = np.floor(azimuth * 180), np.floor(elevation * 180)
+    angular = np.stack((azimuth, elevation), axis=-1) * 180
+    cell_x, cell_y = np.floor(angular[..., 0]), np.floor(angular[..., 1])
     hashed = np.mod(np.sin(cell_x * 12.9898 + cell_y * 78.233) * 43758.5453, 1)
     twinkle = 0.75 + 0.25 * np.sin(t * 3 + hashed * 400)
-    return (hashed > 0.996) * smoothstep(0.0, 0.12, dy / ray_length) * twinkle * night * (1 - cover * 0.9)
+    offset = np.mod(angular, 1) - 0.5
+    spot = 1 - smoothstep(0.14, 0.27, np.linalg.norm(offset, axis=-1))
+    return (hashed > 0.996) * spot * smoothstep(0.0, 0.12, dy / ray_length) * twinkle * night * (1 - cover * 0.9)
 
 
 class Atmosphere:
     WIDTH = 320
     HEIGHT = 180
     FOCAL = WIDTH * 0.52
+    CRUISE_SPEED = 75.0
+    MAX_SPEED = 340.294  # Standard sea-level speed of sound at 59 degrees Fahrenheit, in m/s.
+    FUEL_CAPACITY_GALLONS = 20.0
 
     def __init__(self, pygame):
         self.pg = pygame
@@ -73,7 +80,12 @@ class Atmosphere:
         self.cover = 0.58
         self.wind = 12.0
         self.wind_angle = 0.6
-        self.speed = 75.0
+        self.speed = self.CRUISE_SPEED
+        self.fuel = 100.0
+        self.boosting = False
+        self.third_person = False
+        self.bank = 0.0
+        self.flight_pitch = 0.0
         self.risk = 0.0
         self.drift = np.zeros(2)
         self.precipitation = 0.0
@@ -90,6 +102,10 @@ class Atmosphere:
         for name in ('position', 'drift'):
             if not np.all(np.isfinite(getattr(self, name))):
                 setattr(self, name, np.zeros(2))
+
+    @property
+    def mach(self):
+        return self.speed / self.MAX_SPEED
 
     @property
     def moon_direction(self):
@@ -128,9 +144,23 @@ class Atmosphere:
         pg = self.pg
         dt = min(max(dt, 0.0), 0.15) if math.isfinite(dt) else 0.0
         self.elapsed += dt
-        self.heading += (keys[pg.K_d] - keys[pg.K_a]) * dt * 0.55
+        self.boosting = bool(keys[pg.K_SPACE] and self.fuel > 0)
+        target_speed = self.MAX_SPEED if self.boosting else (self.CRUISE_SPEED if self.fuel > 0 else 45.0)
+        acceleration = 35.0 if self.boosting else 25.0
+        self.speed += float(np.clip(target_speed - self.speed, -acceleration * dt, acceleration * dt))
+        self.speed = float(np.clip(self.speed, 0, self.MAX_SPEED))
+        fast = max(float(self.boosting), float(np.clip(
+            (self.speed - self.CRUISE_SPEED) / (self.MAX_SPEED - self.CRUISE_SPEED), 0, 1)))
+        control = 1 - fast * 0.55
+        turn = keys[pg.K_d] - keys[pg.K_a]
+        climb = (keys[pg.K_w] - keys[pg.K_s]) * control if self.fuel > 0 else -0.025
+        self.heading += turn * dt * 0.55 * control
+        self.bank += (-turn * 0.40 * control - self.bank) * (1 - math.exp(-dt * 5))
+        self.flight_pitch += (climb * 0.30 - self.flight_pitch) * (1 - math.exp(-dt * 3))
+        burn = 0.08 + 0.48 * self.boosting + max(0, climb) * 0.06
+        self.fuel = max(0.0, self.fuel - burn * dt)
         self.pitch = float(np.clip(self.pitch + (keys[pg.K_UP] - keys[pg.K_DOWN]) * dt * 0.35, -1.5, 1.5))
-        self.altitude = float(np.clip(self.altitude + (keys[pg.K_w] - keys[pg.K_s]) * dt * 430, 180, 5500))
+        self.altitude = float(np.clip(self.altitude + climb * dt * 430, 180, 5500))
         if not self.cycle_paused:
             self.hour += dt * 24 / self.day_length
         self.hour += (keys[pg.K_RIGHT] - keys[pg.K_LEFT]) * dt * 2
@@ -150,6 +180,7 @@ class Atmosphere:
 
     def render_array(self):
         t = self.elapsed
+        origin = view_origin(self)
         heading, pitch = view_angles(self)
         dy = self.sy * math.cos(pitch) + math.sin(pitch)
         forward = math.cos(pitch) - self.sy * math.sin(pitch)
@@ -192,12 +223,12 @@ class Atmosphere:
         layers = sorted(layers, key=lambda layer: abs(layer[0] - self.altitude), reverse=True)
         for base, opacity, wind_scale, seed in layers:
             elevation = base + math.sin(t * 0.065 + seed) * (35 + self.cover * 65)
-            delta = elevation - self.altitude
+            delta = elevation - origin[1]
             distance = delta / np.where(np.abs(dy) > 0.008, dy, 0.008)
             valid = (distance > 0) & (np.abs(dy) > 0.008)
             distance = np.clip(distance, 0, 20000)
-            world_x = (self.position[0] + dx * distance - self.drift[0] * wind_scale).astype(np.float32)
-            world_z = (self.position[1] + dz * distance - self.drift[1] * wind_scale).astype(np.float32)
+            world_x = (origin[0] + dx * distance - self.drift[0] * wind_scale).astype(np.float32)
+            world_z = (origin[2] + dz * distance - self.drift[1] * wind_scale).astype(np.float32)
             density = self.sample_cloud(world_x / 11 + seed, world_z / 11 + seed * 2)
             threshold = 0.83 - self.cover * 0.53 + (base / 3000) * 0.09
             alpha = smoothstep(threshold - 0.06, threshold + 0.20, density)
@@ -215,13 +246,14 @@ class Atmosphere:
         return np.clip(np.nan_to_num(scene), 0, 255)
 
     def draw_ground(self, sky, dx, dy, dz):
+        origin = view_origin(self)
         safe_dy = np.minimum(dy, -0.008)
-        distance = np.maximum(0, (100 - self.altitude) / safe_dy)
+        distance = np.maximum(0, (100 - origin[1]) / safe_dy)
         for _ in range(4):
-            x, z = self.position[0] + dx * distance, self.position[1] + dz * distance
+            x, z = origin[0] + dx * distance, origin[2] + dz * distance
             height = 100 + 130 * np.sin(x / 1700) * np.cos(z / 1500)
-            distance = np.maximum(0, (height - self.altitude) / safe_dy)
-        x, z = self.position[0] + dx * distance, self.position[1] + dz * distance
+            distance = np.maximum(0, (height - origin[1]) / safe_dy)
+        x, z = origin[0] + dx * distance, origin[2] + dz * distance
         edge = np.minimum(np.abs((x + 210) % 420 - 210), np.abs((z + 210) % 420 - 210))
         line = 1 - smoothstep(0, np.clip(distance / self.FOCAL, 2, 70), edge)
         daylight = float(smoothstep(-0.12, 0.35, self.sun_direction[1]))
@@ -270,18 +302,29 @@ def draw_hud(pg, surface, atmosphere, fonts, renderer, fps):
         cycle_text = 'REAL TIME'
     subtitle = f'{atmosphere.weather_label}    /    {clock_text}    /    {cycle_text}'
     surface.blit(small.render(subtitle, True, (143, 184, 187)), (29, 58))
-    stats = f'{atmosphere.altitude:04.0f} M   |   WIND {atmosphere.wind:02.0f} M/S   |   COVER {atmosphere.cover:.0%}'
+    stats = (f'{atmosphere.altitude * FEET_PER_METRE:05.0f} FT   |   '
+             f'WIND {atmosphere.wind * MPH_PER_MPS:02.0f} MPH   |   COVER {atmosphere.cover:.0%}')
     surface.blit(font.render(stats, True, ink), (715, 24))
     risk = f'ALTITUDE EXPOSURE  {atmosphere.risk:02.0f}%'
     surface.blit(small.render(risk, True, (245, 190, 127)), (715, 57))
     surface.blit(small.render(f'{renderer} {fps:.0f} FPS', True, ink), (1130, 57))
+    engine = 'BOOST' if atmosphere.boosting else ('CRUISE' if atmosphere.fuel > 0 else 'GLIDING')
+    at_limit = atmosphere.speed >= atmosphere.MAX_SPEED
+    if at_limit:
+        engine = 'MACH 1 - SPEED OF SOUND'
+    # Truncate below the limit so rounding cannot announce Mach 1 prematurely.
+    displayed_mach = math.floor(atmosphere.mach * 100) / 100
+    gallons = atmosphere.fuel / 100 * atmosphere.FUEL_CAPACITY_GALLONS
+    flight = (f'{atmosphere.speed * MPH_PER_MPS:05.1f} MPH   MACH {displayed_mach:.2f}   '
+              f'FUEL {gallons:04.1f} US GAL   {engine}')
+    surface.blit(small.render(flight, True, (255, 214, 140)), (29, 80))
     pg.draw.line(surface, ink, (608, 360), (628, 360), 1)
     pg.draw.line(surface, ink, (652, 360), (672, 360), 1)
     pg.draw.circle(surface, ink, (640, 360), 4, 1)
     pg.draw.rect(surface, (8, 20, 29, 205), (0, 626, 1280, 94))
     ground_name = ['GREEN', 'YELLOW', 'WHITE'][atmosphere.ground_mode]
     lines = [
-        'W/S altitude   A/D heading   Hold RIGHT MOUSE to look   R center view   UP/DOWN look   N ring run',
+        'W/S altitude   A/D heading   SPACE boost   Hold RIGHT MOUSE to orbit   R reset   V view   N rings',
         'F11 or ALT+ENTER fullscreen   LEFT/RIGHT time   P pause cycle   [/] cycle speed   L live weather',
         f'1 clear   2 broken   3 overcast   4 storm   ,/. wind   G ground ({ground_name})   ESC release / exit',
     ]
@@ -322,7 +365,8 @@ def parse_args(argv=None):
     parser.add_argument('--frames', type=int, default=0)
     parser.add_argument('--fullscreen', action='store_true')
     parser.add_argument('--screenshot', type=Path)
-    parser.add_argument('--altitude', type=finite, default=1250)
+    parser.add_argument('--altitude', type=finite, default=1250 * FEET_PER_METRE,
+                        help='Starting altitude in feet')
     parser.add_argument('--time', type=finite, default=None, help='Legacy palette position, 0 day to 1 night')
     parser.add_argument('--hour', type=finite, default=9.0, help='Starting hour in the 24-hour cycle')
     parser.add_argument('--day-length', type=finite, default=240.0, help='Real seconds per simulated 24 hours')
@@ -332,6 +376,7 @@ def parse_args(argv=None):
     parser.add_argument('--city', help='Start with live weather for a city, e.g. "Troy, NY"')
     parser.add_argument('--game', action='store_true', help='Start a ring run right away')
     parser.add_argument('--seed', type=int, default=None, help='Seed for rings and lightning')
+    parser.add_argument('--camera', choices=['third', 'first'], default='third', help='Starting camera view')
     return parser.parse_args(argv)
 
 
@@ -350,6 +395,7 @@ def main(argv=None):
             pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
             pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 3)
             pygame.display.gl_set_attribute(pygame.GL_CONTEXT_PROFILE_MASK, pygame.GL_CONTEXT_PROFILE_CORE)
+            pygame.display.gl_set_attribute(pygame.GL_DEPTH_SIZE, 24)
             flags = pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE
             if args.headless:
                 flags |= pygame.HIDDEN
@@ -369,7 +415,8 @@ def main(argv=None):
     title = pygame.font.SysFont('consolas', 27, bold=True)
     fonts = (font, small, title)
     atmosphere = Atmosphere(pygame)
-    atmosphere.altitude = float(np.clip(args.altitude, 180, 5500))
+    atmosphere.third_person = args.camera == 'third'
+    atmosphere.altitude = float(np.clip(args.altitude / FEET_PER_METRE, 180, 5500))
     atmosphere.hour = args.hour % 24
     if args.time is not None:
         atmosphere.hour = (12 + float(np.clip(args.time, 0, 1)) * 12) % 24
@@ -380,6 +427,10 @@ def main(argv=None):
     if args.preset:
         apply_preset(atmosphere, args.preset)
     systems = build_systems(args)
+    from plane import PlaneModel
+    plane = PlaneModel()
+    if gpu:
+        gpu.set_plane(plane)
     clock = pygame.time.Clock()
     running, frames = True, 0
     start = time.perf_counter()
@@ -404,6 +455,8 @@ def main(argv=None):
                     display_controls.toggle_fullscreen()
                 if event.key == pygame.K_r:
                     atmosphere.look_yaw, atmosphere.pitch = 0.0, 0.03
+                if event.key == pygame.K_v:
+                    atmosphere.third_person = not atmosphere.third_person
                 if event.key == pygame.K_g:
                     atmosphere.ground_mode = (atmosphere.ground_mode + 1) % 3
                 if event.key == pygame.K_p:
@@ -437,6 +490,7 @@ def main(argv=None):
                 window = pygame.display.get_surface()
                 view = atmosphere.render()
                 pygame.transform.smoothscale(view, (width, height), window)
+                plane.draw_world(window, atmosphere)
             draw_hud(pygame, hud, atmosphere, fonts, 'GPU' if gpu else 'CPU', clock.get_fps())
             call_systems(systems, 'draw_hud', hud, atmosphere, fonts)
             scale = min(width / 1280, height / 720)
