@@ -95,7 +95,7 @@ class OnlineRace(RingRun):
             atmosphere.weather_condition=env.get('condition','')
             for key in ('cover','wind','wind_angle','precipitation','storm'):
                 setattr(atmosphere,key,env[key])
-            atmosphere.weather_label=('LIVE WEATHER ' if env['live'] else 'WEATHER UNAVAILABLE ')+env['label']
+            atmosphere.weather_label='OFFLINE PRACTICE' if env.get('offline') else ('LIVE WEATHER ' if env['live'] else 'WEATHER UNAVAILABLE ')+env['label']
         else:
             atmosphere.temperature_f=None
             atmosphere.hour=9
@@ -269,5 +269,6 @@ class OnlineRace(RingRun):
         if data['phase']=='racing':
             message=f"Other racers have {data.get('finish_cutoff',0):.1f}s to finish"
         else:message=f"Returning to lobby in {data['remaining']:.0f}s"
+        if getattr(self.game.network,'offline',False):message='Esc → Restart to practise again'
         ui.text(surface,message,fonts.body,ui.MUTED,(640,395),'midtop')
         ui.text(surface,'E brakes · Runway contact is always safe',fonts.small,ui.MUTED,(640,480),'midtop')

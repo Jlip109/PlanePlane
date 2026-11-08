@@ -64,7 +64,7 @@ class RingRun(Mode):
     description = ('Follow the ring path: blue gates are larger, red gates are smaller. '
                    'Clear gates to add time. Stay within range of the route.')
     RADIUS = 70.0
-    SPACING = 760.0
+    SPACING = 900.0
     START_TIME = 30.0
     BONUS = 9.0
     RING_TYPES = {'blue': (105.0,(65,155,255)), 'red': (45.0,(255,75,75)), 'fuel': (60.0,(65,235,145))}

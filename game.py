@@ -13,6 +13,7 @@ from modes import FreeFlight, RingRun
 from scores import Scores
 from plane import PLANE_MODELS
 from online_mode import OnlineRace
+from practice import OfflinePractice
 
 START = {'position': (0.0, -900.0), 'altitude': 700.0, 'heading': 0.0}
 MENU_STATES = ('title',)
@@ -33,7 +34,7 @@ class Game:
         saved_plane = self.scores.get('plane_model', 'classic')
         atmosphere.plane_id = saved_plane if saved_plane in PLANE_MODELS else 'classic'
         self.hud = Hud(fonts)
-        self.modes = {'free': FreeFlight(self), 'rings': RingRun(self, seed)}
+        self.modes = {'free': FreeFlight(self), 'rings': RingRun(self, seed),'practice':OfflinePractice(self,seed)}
         if mode=='ffa':
             self.modes['ffa']=OnlineRace(self,seed)
         self.mode = None
@@ -80,6 +81,7 @@ class Game:
         atmosphere.braking=atmosphere.boosting=False
         atmosphere.finish_rollout=False
         atmosphere.race_frozen=False
+        atmosphere.left_match=False
         atmosphere.reset_view()
 
     def start(self, key):
@@ -91,7 +93,7 @@ class Game:
         self.sound('start')
 
     def to_title(self):
-        if self.mode and self.mode.key=='ffa':
+        if self.mode and self.mode.key in ('ffa','practice'):
             self.atmosphere.left_match=True
             self.atmosphere.finish_rollout=False
             self.atmosphere.race_frozen=True
@@ -125,7 +127,7 @@ class Game:
             self.cycle_aircraft()
 
     def handle_event(self, event):
-        if self.mode and self.mode.key=='ffa' and self.state=='flying':
+        if self.mode and self.mode.key in ('ffa','practice') and self.state=='flying':
             self.mode.event(event)
         if event.type == pygame.KEYDOWN and event.key == pygame.K_F8:
             self.cycle_aircraft()
@@ -173,7 +175,7 @@ class Game:
 
     def update(self, dt, sim_dt):
         atmosphere = self.atmosphere
-        if self.mode and self.mode.key=='ffa':
+        if self.mode and self.mode.key in ('ffa','practice'):
             self.mode.sync(atmosphere)
         self.menu.update(dt)
         self.hud.update(sim_dt)

@@ -579,7 +579,7 @@ def apply_preset(atmosphere, name):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description='Plane\u00b2: a flight through a living sky.')
-    parser.add_argument('--mode', choices=['menu', 'free', 'rings','ffa'], default='menu',
+    parser.add_argument('--mode', choices=['menu', 'free', 'rings','ffa','practice'], default='menu',
                         help='Skip the title screen and start a mode')
     parser.add_argument('--headless', action='store_true')
     parser.add_argument('--renderer', choices=['auto', 'gpu', 'cpu'], default='auto')
@@ -645,7 +645,7 @@ def open_window(pygame, args):
 
 def main(argv=None):
     args = parse_args(argv)
-    if not args.headless and not args.name and not args.frames:
+    if not args.headless and not args.name and not args.frames and args.mode!='practice':
         from launcher import launch
         if not launch(args):
             return
@@ -656,6 +656,7 @@ def main(argv=None):
         raise SystemExit(str(error)) from error
     if args.mode=='ffa' and not args.connect:
         args.connect=DEFAULT_SERVER
+    if args.mode=='practice':args.connect=None
     network = None
     if args.connect:
         from network import NetworkClient
@@ -703,7 +704,7 @@ def main(argv=None):
         apply_preset(atmosphere, args.preset)
     audio = None
     game = Game(atmosphere, fonts, audio, args.mode, args.seed)
-    game.network = network
+    if network is not None:game.network = network
     if args.mode=='ffa':game.mode.lobby_intent=getattr(args,'lobby_intent',None)
     if network:
         spawn = network.welcome['spawn']
@@ -785,7 +786,7 @@ def main(argv=None):
         if not game.flying and display_controls.mouse_looking:
             display_controls.grab_mouse(False)
         sim_dt = 0.0 if game.paused else dt
-        if game.mode and game.mode.key=='ffa':
+        if game.mode and game.mode.key in ('ffa','practice'):
             game.mode.sync(atmosphere)
         if plane.model_id != atmosphere.plane_id:
             plane = models[atmosphere.plane_id]
@@ -798,15 +799,17 @@ def main(argv=None):
         call_systems(systems, 'update', sim_dt, atmosphere)
         game.update(dt, sim_dt)
         atmosphere.sanitize()
-        if network:
+        if network and game.network is network:
             network.publish(atmosphere)
             atmosphere.remote_players = network.players()
+        elif game.network and getattr(game.network,'offline',False):
+            atmosphere.remote_players=[]
         width, height = pygame.display.get_window_size()
         # A minimized window can report 0x0; skip drawing rather than scaling to nothing.
         if width > 0 and height > 0:
             atmosphere.aspect = width / height
             shade = game.scene_shade()
-            world_mesh = game.mode.world_mesh(atmosphere) if game.mode and game.mode.key in ('rings','ffa') and game.state in ('flying','paused') else None
+            world_mesh = game.mode.world_mesh(atmosphere) if game.mode and game.mode.key in ('rings','ffa','practice') and game.state in ('flying','paused') else None
             remote_mesh = remote_aircraft_mesh(atmosphere.remote_players,models,atmosphere)
             if remote_mesh is not None:
                 world_mesh = remote_mesh if world_mesh is None else tuple(

@@ -12,8 +12,8 @@ from test_features import make_game, press
 
 def test_two_modes_and_wireframe_toggle(atmosphere, fonts, tmp_path):
     game = make_game(atmosphere, fonts, tmp_path)
-    assert set(game.modes) == {'free', 'rings'}
-    assert [key for key, _ in menu.TITLE_ITEMS] == ['free', 'rings', 'aircraft', 'quit']
+    assert set(game.modes) == {'free', 'rings','practice'}
+    assert [key for key, _ in menu.TITLE_ITEMS] == ['free', 'rings','practice', 'aircraft', 'quit']
     assert not hasattr(game, 'radio')
     press(game, pygame.K_F5)
     assert atmosphere.wireframe

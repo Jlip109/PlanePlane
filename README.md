@@ -26,7 +26,19 @@ python main.py
 
 The launcher asks for a username, RGB plane colour, aircraft and server address before
 connecting. **CREATE LOBBY** and **JOIN LOBBY** connect to `wss://planeplane.onrender.com`.
-Offline Free Roam and Ring Mode remain available. Framerate defaults to uncapped.
+Offline Free Roam, endless Ring Mode, and Practice Ring Mode remain available.
+Framerate defaults to uncapped. **Offline Practice Rings** in the launcher starts a
+complete practice race without a lobby, network connection, or recorded scores.
+It is also available from the title menu or directly:
+
+```powershell
+python main.py --mode practice
+```
+
+Offline practice uses simulated weather, a five-second runway countdown, fuel rings,
+the race course and a FINISHED screen. Esc → Restart starts another run; pausing
+stops its local timer. No server or weather API is required, and `--connect` is ignored
+in this mode. Endless Ring Mode remains available separately in the title menu.
 
 ## Online Free for All
 
@@ -48,13 +60,14 @@ starting runway for a five-second countdown. Hold Space to accelerate, then W or
 left-mouse upward steering to take off. The username is reserved while connected;
 duplicate names are rejected, and disconnecting frees the name.
 
-Each route has 48 required rings along about 22 miles of twists, turns and climbs above
+Each route has 40 rings along about 22 miles of twists, turns and climbs above
 12,000 feet. It targets roughly two minutes at 670 mph, rather than imposing a fixed
 two-minute race cutoff. The route always descends toward the finish runway. Blue rings
-award 100 points, smaller red rings award 200. Missing a ring does not advance the course;
-return and clear it before continuing. Green fuel rings remain optional detours.
+award 100 points, smaller red rings award 200. Rings are spaced about 20% farther apart
+than the previous 48-ring course. Passing a missed ring advances the target but earns
+no points; missing rings cannot block the finish screen. Green fuel rings remain optional detours.
 
-Clearing the course and touching the finish runway immediately shows **FINISHED** with
+Touching the finish runway immediately shows **FINISHED** with
 the pilot's elapsed time. Finish order determines placing. The first finisher starts a
 30-second countdown for everyone else; remaining racers are disqualified at the cutoff.
 If everyone finishes or is disqualified sooner, the results start immediately. There is
@@ -63,6 +76,9 @@ records; solo practice never writes them. Server session records last for the ro
 
 A controlled landing adds 500 bonus points when speed is at most 123 mph and the wings
 and nose are nearly level. A faster runway arrival still finishes, without that bonus.
+Finish contact uses a surface-height tolerance and a swept crossing test, so a runway
+touch between network updates is detected rather than missed. Flying above the runway
+does not count as touching it.
 After finishing, the aircraft automatically brakes to zero, stays inside the runway,
 and ignores throttle/steering inputs while the finish time and placing remain fixed.
 Hold **E** to brake, even while holding Space. Brakes can stop the plane on the runway;
@@ -123,6 +139,7 @@ Choose **Free Roam** to explore or **Ring Mode** to fly through ten-sided 3D gat
 Clear gates before the timer runs out to gain time and build a score multiplier.
 Blue gates have larger openings (105-metre radius); red gates are smaller
 (45-metre radius). They alternate along a route with gradual turns and elevation changes.
+The endless Ring Mode spacing is now 900 metres, up from 760 metres.
 Use **Esc → Ring path range** to set the allowed distance from the 3D route,
 from 250 to 5,000 feet. The setting saves automatically. Leaving the route shows
 a five-second return countdown; returning resets it, while staying out ends the run.

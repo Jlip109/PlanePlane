@@ -35,7 +35,7 @@ class Hud:
         self.draw_weather(surface, atmosphere)
         self.draw_readouts(surface, atmosphere, game.refueling)
         self.draw_radar(surface, atmosphere, target)
-        if game.network:
+        if game.network and not getattr(game.network,'offline',False):
             status = game.network.status
             text = f'ONLINE  {len(atmosphere.remote_players)+1} PILOTS' if status == 'Connected' else 'DISCONNECTED'
             ui.text(surface,text,fonts.tiny,ui.MUTED,(24,478),shadow=True)

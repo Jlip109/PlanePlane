@@ -27,7 +27,7 @@ class Profile:
         self.buttons = [(pygame.Rect(70,490,320,48),'create','CREATE LOBBY'),
                         (pygame.Rect(410,490,320,48),'join','JOIN LOBBY'),
                         (pygame.Rect(70,550,320,42),'free','Offline Free Roam'),
-                        (pygame.Rect(410,550,320,42),'rings','Offline Ring Mode')]
+                        (pygame.Rect(410,550,320,42),'practice','Offline Practice Rings')]
         self.model = args.plane or self.scores.get('plane_model','classic')
         if self.model not in PLANE_MODELS:
             self.model = 'classic'

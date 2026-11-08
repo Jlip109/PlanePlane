@@ -83,15 +83,15 @@ def test_competitive_finish_records_time_once(atmosphere,fonts,tmp_path):
     assert len(room.records)==1
 
 
-def test_missed_ring_cannot_advance_the_race():
+def test_missed_ring_costs_points_but_cannot_block_runway_finish():
     room,now=prepared();now[0]=5;room.tick()
     ring=room.rings[0]
     for side in (-5,5):
         room.receive('a',state(x=ring['x']+ring['nx']*side+ring['nz']*200,
                                z=ring['z']+ring['nz']*side-ring['nx']*200,y=ring['y']))
-    assert room.members['a']['next_gate']==0
+    assert room.members['a']['next_gate']==1 and room.members['a']['score']==0
     room.receive('a',state(z=FINISH_Z,speed=10))
-    assert room.members['a']['status']=='racing'
+    assert room.members['a']['status']=='finished'
 
 
 def test_high_course_is_about_two_minutes_and_ends_at_runway():

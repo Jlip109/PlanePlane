@@ -29,7 +29,7 @@ def spawn_for(slot):
 
 def course(seed):
     rng = random.Random(seed)
-    count = 48
+    count = 40
     mirror = rng.choice((-1,1))
     phase = rng.uniform(-.25,.25)
     points=[]
@@ -99,6 +99,23 @@ def ring_crossing(previous,current,ring,angle):
     v=cross['y']-ring['y']
     apothem=(70-3)*ring['radius']/70*math.cos(math.pi/10)
     return all(h*math.cos((i+.5)*math.tau/10+angle)+v*math.sin((i+.5)*math.tau/10+angle)<=apothem for i in range(10))
+
+
+def touches_finish(previous, current):
+    """Surface contact, including crossing the runway between network updates."""
+    bounds={'x':(-90.,90.),'y':(RUNWAY_Y-2,RUNWAY_Y+5),'z':(FINISH_Z-900,FINISH_Z+900)}
+    if all(low<=current[key]<=high for key,(low,high) in bounds.items()):return True
+    if previous is None:return False
+    entry,exit=0.,1.
+    for key,(low,high) in bounds.items():
+        start=previous[key];delta=current[key]-start
+        if abs(delta)<1e-9:
+            if not low<=start<=high:return False
+        else:
+            a,b=sorted(((low-start)/delta,(high-start)/delta))
+            entry=max(entry,a);exit=min(exit,b)
+            if entry>exit:return False
+    return True
 
 
 class RaceRoom:
@@ -173,6 +190,12 @@ class RaceRoom:
         p = self.members.get(player_id)
         if not p or self.phase != 'racing' or p['status']!='racing':
             return
+        previous = p['previous']
+        if not state.get('left_match') and touches_finish(previous,state):
+            if state['speed']<=55 and abs(state['bank'])<.3 and abs(state['flight_pitch'])<.3:
+                p['score']+=LANDING_BONUS
+            self.finish_player(p)
+            return
         if state.get('crashed'):
             self.disqualify(p,'Crashed')
             return
@@ -186,7 +209,6 @@ class RaceRoom:
         if state['y'] <= floor+1.5 and not runway_at(state['x'],state['z']):
             self.disqualify(p,'Crashed')
             return
-        previous = p['previous']
         p['previous'] = dict(state)
         index = p['next_gate']
         if previous and index<len(self.rings):
@@ -196,7 +218,7 @@ class RaceRoom:
             if inside is not None:
                 if inside:
                     p['score'] += 200 if ring['kind']=='red' else 100
-                    p['next_gate'] += 1
+                p['next_gate'] += 1
         if previous:
             for ring in self.fuel_rings:
                 if ring['id'] in p['collected_fuel']:
@@ -205,10 +227,6 @@ class RaceRoom:
                 if ring_crossing(previous,state,ring,angle):
                     p['collected_fuel'].append(ring['id'])
                     p['fuel_credit']+=FUEL_RING_REFILL
-        if p['next_gate']==len(self.rings) and abs(state['x'])<=90 and abs(state['z']-FINISH_Z)<=900 and state['y']<=RUNWAY_Y+4:
-            if state['speed']<=55 and abs(state['bank'])<.3 and abs(state['flight_pitch'])<.3:
-                p['score']+=LANDING_BONUS
-            self.finish_player(p)
 
     def finish_player(self, player):
         now=self.clock()

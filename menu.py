@@ -4,7 +4,7 @@ import pygame
 
 import ui
 
-TITLE_ITEMS = [('free', 'Free Roam'), ('rings', 'Ring Mode'), ('aircraft', 'Aircraft'), ('quit', 'Quit')]
+TITLE_ITEMS = [('free', 'Free Roam'), ('rings', 'Ring Mode'), ('practice','Practice Ring Mode'), ('aircraft', 'Aircraft'), ('quit', 'Quit')]
 VISIBLE_TITLE_ITEMS = TITLE_ITEMS
 PAUSE_ITEMS = [('resume', 'Resume'), ('restart', 'Restart'), ('title', 'Main Menu'),
                ('frame_limit', 'Frame cap'), ('quit', 'Quit Game')]

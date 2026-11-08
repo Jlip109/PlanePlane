@@ -38,6 +38,7 @@ def test_cli_rejects_nan_without_traceback():
 
 
 @pytest.mark.parametrize('extra', [
+    ['--mode', 'practice', '--connect', 'ws://127.0.0.1:1'],
     ['--mode', 'menu'],
     ['--mode', 'free', '--preset', 'storm'],
     ['--mode', 'rings', '--hour', '23.5', '--preset', 'clear', '--ground', 'winter'],
