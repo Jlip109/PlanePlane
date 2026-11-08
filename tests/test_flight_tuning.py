@@ -69,10 +69,10 @@ def test_ws_endpoints_change_motion_nose_and_release(pg, fps, key, direction):
             a.update(1/fps, Keys())
         results.append((speed, pitch, abs(a.vertical_speed)/speed))
     slow, fast = results
-    assert slow[0] < main.CLIMB_RATE*.15
+    assert slow[0] < main.CLIMB_RATE*.2
     assert fast[0] > main.CLIMB_RATE*3*.95
     assert fast[1] > slow[1]*10
-    assert slow[2] > .85 and fast[2] < .05
+    assert slow[2] > .8 and fast[2] < .05
 
 
 def test_ws_response_increases_across_entire_slider(pg):

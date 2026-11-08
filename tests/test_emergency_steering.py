@@ -43,16 +43,16 @@ def test_opposing_commands_cancel_but_keys_cost_fuel(pg, key, yaw, pitch, attrib
     opposing = fly_input(pg, yaw, pitch, {key: 1})
     idle = fly_input(pg)
     assert getattr(opposing, attribute) == pytest.approx(0)
-    assert idle.fuel-opposing.fuel == pytest.approx(.18/60)
+    assert idle.fuel-opposing.fuel == pytest.approx(.18*main.FUEL_USAGE_SCALE/60)
 
 
 def test_keyboard_cost_is_per_axis_and_stops_on_release(pg):
     a = fly_input(pg, keys={pygame.K_d: 1, pygame.K_s: 1})
     idle = fly_input(pg)
-    assert idle.fuel-a.fuel == pytest.approx(.36/60)
+    assert idle.fuel-a.fuel == pytest.approx(.36*main.FUEL_USAGE_SCALE/60)
     before = a.fuel
     a.fly(1/60, Keys().__getitem__)
-    assert before-a.fuel == pytest.approx(.08/60)
+    assert before-a.fuel == pytest.approx(.08*main.FUEL_USAGE_SCALE/60)
 
 
 def test_right_mouse_look_does_not_add_steering(pg):

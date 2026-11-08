@@ -62,6 +62,10 @@ def star_field(dx, dy, dz, ray_length, night, cover, t):
 CLOUD_LAYERS = [(850, 0.52, 0.85, 24), (1450, 0.43, 1.0, 97), (2150, 0.32, 1.23, 161), (3000, 0.20, 1.5, 233)]
 MAX_ALTITUDE = 5500.0
 CLIMB_RATE = 60.0
+FUEL_USAGE_SCALE = 4.0
+GRAVITY = 9.81
+UNPOWERED_DRAG = 35.0
+MAX_FALL_SPEED = 180.0
 
 
 class NoKeys:
@@ -107,6 +111,7 @@ class Atmosphere:
         self.wind_angle = 0.6
         self.speed = self.CRUISE_SPEED
         self.fuel = 100.0
+        self.braking = False
         self.vertical_speed = 0.0
         self.bank = 0.0
         self.flight_pitch = 0.0
@@ -125,6 +130,7 @@ class Atmosphere:
         self.flight_tuning = {'climb':60,'acceleration':50,'steering':50}
         self.plane_color = (220,220,220)
         self.race_frozen = False
+        self.finish_rollout = False
         self.left_match = False
         self.temperature_f = None
         self.temperature_reference_altitude = 0.0
@@ -177,7 +183,7 @@ class Atmosphere:
     def climb_response_rate(self):
         # 0: a two-second time constant; 100: 0.05 seconds. Higher is faster.
         response_time = 2.0 * (0.05 / 2.0) ** (self.flight_tuning['climb'] / 100)
-        return 1.0 / response_time
+        return 1.75 / response_time
 
     @property
     def climb_rate(self):
@@ -203,8 +209,8 @@ class Atmosphere:
         self.look_target_yaw = (self.look_target_yaw + relative[0] * 0.0025 + math.pi) % math.tau - math.pi
         self.look_target_pitch = float(np.clip(self.look_target_pitch - relative[1] * 0.0025,-1.5,1.5))
 
-    def set_mouse_steering(self, enabled):
-        if self.mouse_steering and not enabled:
+    def set_mouse_steering(self, enabled, preserve_view=False):
+        if self.mouse_steering and not enabled and not preserve_view:
             self.look_target_yaw = 0.0
             self.look_target_pitch = DEFAULT_PITCH
         self.mouse_steering = enabled
@@ -290,6 +296,9 @@ class Atmosphere:
 
     def fly(self, dt, press):
         pg = self.pg
+        if self.finish_rollout:
+            self.roll_to_stop(dt)
+            return
         if self.race_frozen:
             self.speed = self.vertical_speed = 0.0
             return
@@ -299,12 +308,18 @@ class Atmosphere:
             return
         # Boost pushes toward Mach 5 and burns fuel; the faster you go, the less the controls bite.
         cruise = self.CRUISE_SPEED * self.speed_scale
-        self.boosting = bool(press(pg.K_SPACE) and self.fuel > 0)
-        target_speed = self.MAX_SPEED if self.boosting else (cruise if self.fuel > 0 else 45.0)
+        self.braking = bool(press(pg.K_e))
+        self.boosting = bool(press(pg.K_SPACE) and self.fuel > 0 and not self.braking)
+        target_speed = self.MAX_SPEED if self.boosting else (cruise if self.fuel > 0 else 0.0)
+        if self.braking:
+            grounded=world.on_runway(*self.position) and self.altitude<=world.RUNWAY_HEIGHT+4
+            target_speed=min(self.speed,0.0 if grounded or self.fuel<=0 else 35.0)
         acceleration = 25.0
         if target_speed > self.speed:
             acceleration = 70.0 if self.boosting else 50.0
         acceleration *= 2**((self.flight_tuning['acceleration']-50)/30)
+        if self.fuel<=0:acceleration=UNPOWERED_DRAG
+        if self.braking:acceleration=240.0
         self.speed += float(np.clip(target_speed - self.speed, -acceleration * dt, acceleration * dt))
         self.speed = float(np.clip(self.speed, 0, self.MAX_SPEED))
         fast = max(float(self.boosting), float(np.clip((self.speed - cruise) / (self.MAX_SPEED - cruise), 0, 1)))
@@ -319,9 +334,9 @@ class Atmosphere:
         # Each input has its own full authority: matching commands stack to 200%.
         turn = keyboard_turn + mouse_turn
         climb_input = keyboard_climb + mouse_climb
-        climb = climb_input * control if self.fuel > 0 else -0.025
+        climb = climb_input * control if self.fuel > 0 else 0.0
         steering = 2**((self.flight_tuning['steering']-50)/50)
-        self.bank += (-turn * 0.50 * control * self.handling * steering - self.bank) * (1 - math.exp(-dt * 4 * steering))
+        self.bank += (-turn * 0.50 * control * self.handling * steering - self.bank) * (1 - math.exp(-dt * 7 * steering))
         previous_heading = self.heading
         self.heading = (self.heading - self.bank * dt * 1.1 + math.pi) % math.tau - math.pi
         if self.mouse_steering:
@@ -330,12 +345,16 @@ class Atmosphere:
             self.look_target_yaw = (self.look_target_yaw-changed+math.pi) % math.tau-math.pi
         emergency_burn = .18 * (abs(keyboard_turn) + abs(keyboard_climb))
         burn = 0.08 + 0.48 * self.boosting / self.boost_scale + max(0, climb) * 0.06 + emergency_burn
-        burn *= temperature.fuel_multiplier(self.air_temperature_f)
+        burn *= FUEL_USAGE_SCALE * temperature.fuel_multiplier(self.air_temperature_f)
         self.fuel = max(0.0, self.fuel - burn * dt)
         response_ease = 1-math.exp(-dt*self.climb_response_rate)
-        vertical_change = (climb*self.climb_rate-self.vertical_speed)*response_ease
-        limit = self.vertical_acceleration*dt*max(1,abs(climb_input))
-        self.vertical_speed += float(np.clip(vertical_change,-limit,limit))
+        if self.fuel<=0:
+            self.boosting=False
+            self.vertical_speed=max(-MAX_FALL_SPEED,self.vertical_speed-GRAVITY*dt)
+        else:
+            vertical_change = (climb*self.climb_rate-self.vertical_speed)*response_ease
+            limit = self.vertical_acceleration*dt*max(1,abs(climb_input))
+            self.vertical_speed += float(np.clip(vertical_change,-limit,limit))
         target_pitch = float(np.clip(math.atan2(self.vertical_speed,max(self.speed,.1)),-.7,.7))
         self.flight_pitch += (target_pitch-self.flight_pitch)*response_ease
         self.altitude = min(self.altitude + self.vertical_speed * dt, MAX_ALTITUDE)
@@ -350,6 +369,30 @@ class Atmosphere:
         elif self.altitude < floor + 1.5:
             self.altitude = floor + 1.5
             self.crash()
+
+    def roll_to_stop(self, dt):
+        """Post-finish rollout, with braking strong enough to stay on the runway."""
+        from race import FINISH_Z,RUNWAY_Y
+        self.boosting=False
+        self.braking=self.speed>0
+        self.crash_timer=self.impact=0.0
+        self.altitude=RUNWAY_Y+3
+        self.vertical_speed=0.0
+        level=1-math.exp(-dt*8)
+        self.bank+=(0-self.bank)*level
+        self.flight_pitch+=(0-self.flight_pitch)*level
+        low=np.array([-80.,FINISH_Z-880.])
+        high=np.array([80.,FINISH_Z+880.])
+        self.position=np.clip(self.position,low,high)
+        direction=np.array([math.sin(self.heading),math.cos(self.heading)])
+        distances=[(high[i]-self.position[i])/d if d>0 else (low[i]-self.position[i])/d
+                   for i,d in enumerate(direction) if abs(d)>1e-8]
+        remaining=max(0,min(distances))
+        deceleration=max(100.,self.speed*self.speed/(2*max(remaining-2,1)))
+        elapsed=min(dt,self.speed/deceleration)
+        travel=min(remaining,max(0,self.speed*elapsed-.5*deceleration*elapsed*elapsed))
+        self.position+=direction*travel
+        self.speed=max(0,self.speed-deceleration*dt) if remaining>.01 else 0.0
 
     def crash(self):
         if self.crashed:
@@ -470,6 +513,8 @@ class DisplayControls:
         self.fullscreen = False
         self.mouse_looking = False
         self.look_buttons = set()
+        self.freecam_active=False
+        self.previous_view=True
         self.windowed_size = pygame.display.get_window_size()
 
     def toggle_fullscreen(self):
@@ -497,6 +542,15 @@ class DisplayControls:
         else:
             self.look_buttons.discard(button)
         self.grab_mouse(bool(self.look_buttons))
+
+    def sync_mouse_mode(self, atmosphere, flying):
+        freecam=flying and 2 in self.look_buttons
+        if freecam and not self.freecam_active:
+            self.previous_view=atmosphere.third_person
+        if freecam:atmosphere.third_person=True
+        elif self.freecam_active:atmosphere.third_person=self.previous_view
+        self.freecam_active=freecam
+        atmosphere.set_mouse_steering(flying and 1 in self.look_buttons and not freecam,preserve_view=freecam)
 
 
 def call_systems(systems, method, *args):
@@ -534,6 +588,8 @@ def parse_args(argv=None):
     parser.add_argument('--plane', choices=['classic','f15','odd'], default=None, help='Aircraft model')
     parser.add_argument('--connect', help='Join a multiplayer server: HOST:PORT on a LAN, or wss://... online')
     parser.add_argument('--name', default=None, help='Multiplayer display name; normally entered in the launcher')
+    parser.add_argument('--lobby',type=int,choices=(1,2,3),default=1,help='Online lobby slot')
+    parser.add_argument('--lobby-action',choices=('auto','browse','create','join'),default='auto')
     parser.add_argument('--color', help='Plane RGB, e.g. "255,0,0"')
     parser.add_argument('--frames', type=int, default=0)
     parser.add_argument('--fullscreen', action='store_true')
@@ -605,16 +661,16 @@ def main(argv=None):
         from network import NetworkClient
         print(f'Connecting to {args.connect} ...', flush=True)
         try:
-            network = NetworkClient(args.connect,args.name or 'Pilot',args.plane or 'classic',args.mode,color)
+            network = NetworkClient(args.connect,args.name or 'Pilot',args.plane or 'classic',args.mode,color,args.lobby,args.lobby_action)
         except (OSError,ValueError) as error:
             raise SystemExit(f'Could not join server: {error}') from error
         args.seed = network.welcome['seed']
         import atexit
         atexit.register(network.close)
         args.hour = network.welcome['hour']
-        if args.mode=='ffa' and 'race' not in network.welcome:
+        if args.mode=='ffa' and network.welcome.get('lobby_protocol')!=2:
             network.close()
-            raise SystemExit('This server needs the Free for All update. Redeploy the latest code on Render.')
+            raise SystemExit('This server needs the three-lobby race update. Redeploy the latest code on Render.')
         if args.mode == 'menu':
             args.mode = 'free'
     use_gpu = args.renderer == 'gpu' or (args.renderer == 'auto' and not args.headless)
@@ -648,6 +704,7 @@ def main(argv=None):
     audio = None
     game = Game(atmosphere, fonts, audio, args.mode, args.seed)
     game.network = network
+    if args.mode=='ffa':game.mode.lobby_intent=getattr(args,'lobby_intent',None)
     if network:
         spawn = network.welcome['spawn']
         atmosphere.position = np.array([spawn['x'],spawn['z']])
@@ -710,12 +767,12 @@ def main(argv=None):
                         atmosphere.day_length = max(10, atmosphere.day_length / 2)
                     elif event.key in presets:
                         apply_preset(atmosphere, presets[event.key])
-                if event.type == pygame.MOUSEBUTTONDOWN and event.button in (1, 3):
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button in (1, 2, 3):
                     display_controls.set_look_button(event.button, True)
                 if event.type == pygame.MOUSEMOTION and display_controls.mouse_looking:
                     atmosphere.mouse_look(event.rel)
                 call_systems(systems, 'handle_event', event, atmosphere)
-            if event.type == pygame.MOUSEBUTTONUP and event.button in (1, 3):
+            if event.type == pygame.MOUSEBUTTONUP and event.button in (1, 2, 3):
                 display_controls.set_look_button(event.button, False)
             if event.type == pygame.WINDOWFOCUSLOST:
                 display_controls.grab_mouse(False)
@@ -736,7 +793,7 @@ def main(argv=None):
             if gpu:
                 gpu.set_plane(plane)
         keys = pygame.key.get_pressed() if game.flying else NoKeys()
-        atmosphere.set_mouse_steering(game.flying and 1 in display_controls.look_buttons)
+        display_controls.sync_mouse_mode(atmosphere,game.flying)
         atmosphere.update(sim_dt, keys)
         call_systems(systems, 'update', sim_dt, atmosphere)
         game.update(dt, sim_dt)

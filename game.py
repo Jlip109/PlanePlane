@@ -77,6 +77,9 @@ class Game:
         atmosphere.vertical_speed = atmosphere.bank = atmosphere.flight_pitch = 0.0
         atmosphere.crash_timer = atmosphere.impact = 0.0
         atmosphere.fuel = 100.0
+        atmosphere.braking=atmosphere.boosting=False
+        atmosphere.finish_rollout=False
+        atmosphere.race_frozen=False
         atmosphere.reset_view()
 
     def start(self, key):
@@ -90,6 +93,7 @@ class Game:
     def to_title(self):
         if self.mode and self.mode.key=='ffa':
             self.atmosphere.left_match=True
+            self.atmosphere.finish_rollout=False
             self.atmosphere.race_frozen=True
             if self.network:
                 self.network.close()

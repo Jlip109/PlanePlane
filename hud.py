@@ -122,14 +122,19 @@ class Hud:
             value_rect = ui.text(surface, value, fonts.mono, ui.TEXT, (right, 54), 'bottomright', shadow=True)
             ui.label(surface, name, fonts.tiny, (value_rect.left, 22), shadow=True)
             x = value_rect.left - 28
-        if atmosphere.speed >= atmosphere.MAX_SPEED:
+        if getattr(atmosphere,'finish_rollout',False):
+            state,color=('Parked' if atmosphere.speed<=.1 else 'Braking'),ui.ACCENT
+        elif atmosphere.fuel<=0:
+            grounded=world.on_runway(*atmosphere.position) and atmosphere.altitude<=world.RUNWAY_HEIGHT+4
+            state,color=('Fuel empty' if grounded else 'Falling - no fuel'),ui.ALERT
+        elif getattr(atmosphere,'braking',False):
+            state,color='Braking',ui.ACCENT
+        elif atmosphere.speed >= atmosphere.MAX_SPEED:
             state, color = 'MACH 5 - SPEED LIMIT', ui.ACCENT
         elif refueling:
             state, color = 'Refueling', ui.GOOD
         elif atmosphere.boosting:
             state, color = 'Boost', ui.ACCENT
-        elif atmosphere.fuel <= 0:
-            state, color = 'Gliding', ui.ALERT
         else:
             state, color = 'Cruise', ui.MUTED
         low = atmosphere.fuel < 15

@@ -13,7 +13,7 @@ from race import START_Z,FINISH_Z,RUNWAY_Y
 class OnlineRace(RingRun):
     name = 'Free for All'
     key = 'ffa'
-    description = 'Two-minute online race. Everyone ready, five-second runway start. Highest score wins.'
+    description = 'Twisting high-altitude race. First finisher wins; everyone else has 30 seconds to finish.'
 
     def __init__(self,game,seed=None):
         super().__init__(game,seed)
@@ -23,6 +23,10 @@ class OnlineRace(RingRun):
         self.ready = False
         self.fuel_credit = 0
         self.scoring_count = 0
+        self.lobby_intent = None
+        self.lobby_areas = []
+        self.leave_rect=pygame.Rect(500,625,280,28)
+        self.last_record=None
         self.scroll = 0
         self.ready_rect = pygame.Rect(500,580,280,44)
         self.runways = self.runway_mesh()
@@ -51,15 +55,24 @@ class OnlineRace(RingRun):
         network=self.game.network
         if not network:
             atmosphere.race_frozen=True
+            atmosphere.finish_rollout=False
             return
         data=network.race
         if not data:
+            self.snapshot=self.local=None
+            self.active=False
+            self.rings=[]
+            self.ring_types={}
+            self.ready=False
+            atmosphere.race_frozen=True
+            atmosphere.finish_rollout=False
             return
         self.snapshot=data
         self.local=next((p for p in data['players'] if p['id']==network.player_id),None)
         phase=data['phase']
-        if data['round']!=self.round_id and self.local and 'spawn' in self.local:
-            self.round_id=data['round']
+        identity=data.get('race_id',(getattr(network,'lobby_id',1),data['round']))
+        if identity!=self.round_id and self.local and 'spawn' in self.local:
+            self.round_id=identity
             self.game.reset_flight()
             spawn=self.local['spawn']
             atmosphere.position=np.array([spawn['x'],spawn['z']])
@@ -92,9 +105,18 @@ class OnlineRace(RingRun):
             atmosphere.wind=atmosphere.precipitation=atmosphere.storm=0
             atmosphere.cover=.35
         status=self.local['status'] if self.local else 'waiting'
+        atmosphere.finish_rollout=status=='finished' and phase in ('racing','results') and network.status.startswith('Connected')
         atmosphere.race_frozen=phase!='racing' or status!='racing' or not network.status.startswith('Connected')
         self.active=phase in ('countdown','racing')
-        self.time=max(0,120-data['remaining']) if phase=='racing' else 0
+        self.time=data.get('elapsed',0) if phase=='racing' else 0
+        if self.local and self.local['status']=='finished' and not data.get('practice',False) and self.last_record!=identity:
+            self.game.scores.best('ffa_best_score',self.local['score'])
+            finish_time=self.local['finish_time']
+            best=self.game.scores.get('ffa_best_time',0.0)
+            if not best or finish_time<best:
+                self.game.scores.data['ffa_best_time']=float(finish_time)
+                self.game.scores.save()
+            self.last_record=identity
         index=self.local.get('next_gate',0) if self.local else 0
         remaining=data['rings'][index:]
         self.scoring_count=len(remaining)
@@ -120,7 +142,7 @@ class OnlineRace(RingRun):
         if self.active and self.scoring_count:
             return super().target()
         if self.active:
-            return 0,RUNWAY_Y,FINISH_Z,'LAND FOR +500'
+            return 0,RUNWAY_Y,FINISH_Z,'FINISH RUNWAY'
 
     def on_crash(self,atmosphere):
         atmosphere.race_frozen=True
@@ -133,6 +155,16 @@ class OnlineRace(RingRun):
         if event.type==pygame.MOUSEWHEEL:
             count=len(self.snapshot['players']) if self.snapshot else 0
             self.scroll=max(0,min(max(0,count-12),self.scroll-event.y))
+        if event.type==pygame.MOUSEBUTTONDOWN and event.button==1:
+            point=self.game.menu.to_hud(event.pos)
+            if not self.snapshot:
+                if pygame.Rect(370,150,250,42).collidepoint(point):self.lobby_intent='create'
+                if pygame.Rect(660,150,250,42).collidepoint(point):self.lobby_intent='join'
+                for rect,action,lobby in self.lobby_areas:
+                    if rect.collidepoint(point):self.game.network.select_lobby(action,lobby)
+            elif self.snapshot['phase']=='lobby' and self.leave_rect.collidepoint(point):
+                self.game.network.select_lobby('leave')
+                return
         if not self.snapshot or self.snapshot['phase']!='lobby':
             return
         clicked=event.type==pygame.MOUSEBUTTONDOWN and event.button==1 and self.ready_rect.collidepoint(self.game.menu.to_hud(event.pos))
@@ -144,19 +176,30 @@ class OnlineRace(RingRun):
     def draw_hud(self,surface,atmosphere,fonts):
         data=self.snapshot
         if not data:
-            ui.text(surface,'Connecting to race lobby…',fonts.h1,ui.TEXT,(640,220),'midtop')
+            self.draw_browser(surface,fonts)
             return
         phase=data['phase']
+        if self.local and self.local['status']=='finished':
+            self.draw_finished(surface,fonts,data)
+            return
         if phase=='racing':
             if self.local and self.local['status']=='waiting':
                 ui.text(surface,'Waiting for the next round',fonts.h1,ui.ACCENT,(640,220),'midtop',shadow=True)
                 return
             score=self.local['score'] if self.local else 0
-            ui.text(surface,f"{data['remaining']:05.1f}s · {score} POINTS",fonts.h1,ui.TEXT,(640,110),'midtop',shadow=True)
+            ui.text(surface,f"TIME {data.get('elapsed',0):06.2f}s · {score} POINTS",fonts.h1,ui.TEXT,(640,110),'midtop',shadow=True)
             ui.text(surface,'BLUE +100 · RED +200 · GREEN +5 US GAL',fonts.small,ui.TEXT,(640,154),'midtop',shadow=True)
-            ranked=sorted(data['players'],key=lambda p:(p['status']=='disqualified',-p['score']))
+            cutoff=data.get('finish_cutoff')
+            if cutoff is not None:
+                ui.text(surface,f'FINISH WITHIN {cutoff:04.1f}s OR BE DISQUALIFIED',fonts.h2,ui.ALERT,(640,190),'midtop',shadow=True)
+            if data.get('practice'):
+                ui.text(surface,'PRACTICE · SCORES NOT RECORDED',fonts.small,ui.ACCENT,(640,76),'midtop',shadow=True)
+            ranked=sorted(data['players'],key=lambda p:(p['status']=='disqualified',p.get('place') or 999,-p['next_gate']))
             for i,p in enumerate(ranked[self.scroll:self.scroll+8]):
-                ui.text(surface,f"{p['name']}  {p['score']}"+(' · DQ' if p['status']=='disqualified' else ''),fonts.small,ui.TEXT,(1240,170+i*24),'topright',shadow=True)
+                text=f"{p['name']} · {p['next_gate']}/{len(data['rings'])}"
+                if p['status']=='finished':text=f"{p['place']}. {p['name']} · {p['finish_time']:.2f}s"
+                elif p['status']=='disqualified':text=f"{p['name']} · DQ"
+                ui.text(surface,text,fonts.small,ui.TEXT,(1240,170+i*24),'topright',shadow=True)
             if self.local and self.local['status']=='disqualified':
                 ui.text(surface,'DISQUALIFIED · '+self.local['reason'],fonts.h1,ui.ALERT,(640,220),'midtop',shadow=True)
             elif self.local and self.local['landed']:
@@ -165,23 +208,66 @@ class OnlineRace(RingRun):
         ui.panel(surface,(350,100,580,550),(9,18,27,235))
         title={'lobby':'FREE FOR ALL · LOBBY','loading':'Waiting for the match to finalize',
                'countdown':f"STARTING IN {math.ceil(data['remaining'])}",'results':'RACE RESULTS'}[phase]
+        lobby=getattr(self.game.network,'lobby_id',None)
+        if phase=='lobby':title=f'LOBBY {lobby or 1} · FREE FOR ALL'
         ui.text(surface,title,fonts.h2,ui.ACCENT,(640,125),'midtop')
         if phase=='countdown':
             ui.text(surface,'Hold Space to accelerate · W or mouse up to take off',fonts.small,ui.TEXT,(640,168),'midtop')
             ui.text(surface,'Random location reveals at GO',fonts.small,ui.MUTED,(640,552),'midtop')
         elif phase=='lobby':
-            ui.text(surface,'At least two pilots · Everyone must be READY',fonts.small,ui.TEXT,(640,168),'midtop')
+            count=sum(p['connected'] for p in data['players'])
+            hint='Solo practice · Scores will not be recorded' if count==1 else f'{count}/24 racers · Everyone must be READY'
+            ui.text(surface,hint,fonts.small,ui.TEXT,(640,168),'midtop')
         elif phase=='results':
             names=[p['name'] for p in data['players'] if p['id'] in data['winners']]
             ui.text(surface,'Winner: '+', '.join(names) if names else 'No eligible finishers',fonts.body,ui.TEXT,(640,168),'midtop')
-        pilots=sorted(data['players'],key=lambda p:(p['status']=='disqualified',-p['score'])) if phase=='results' else data['players']
+        pilots=sorted(data['players'],key=lambda p:(p['status']=='disqualified',p.get('place') or 999)) if phase=='results' else data['players']
         for i,p in enumerate(pilots[self.scroll:self.scroll+12]):
             status=('READY' if p['ready'] else 'Not ready') if phase=='lobby' else f"{p['score']} · {p['status']}"
             ui.text(surface,p['name'],fonts.body,ui.TEXT,(380,210+i*27))
             ui.text(surface,status,fonts.small,ui.ACCENT if p['ready'] else ui.MUTED,(900,210+i*27),'topright')
         if phase=='lobby':
             pygame.draw.rect(surface,(45,100,120),self.ready_rect,border_radius=7)
-            ui.text(surface,'UNREADY' if self.ready else 'READY',fonts.h2,ui.TEXT,self.ready_rect.center,'center')
+            label='UNREADY' if self.ready else 'START PRACTICE' if sum(p['connected'] for p in data['players'])==1 else 'READY'
+            ui.text(surface,label,fonts.h2,ui.TEXT,self.ready_rect.center,'center')
+            ui.text(surface,'BACK TO LOBBIES',fonts.small,ui.MUTED,self.leave_rect.center,'center')
         env=data.get('environment')
         if env:
             ui.text(surface,env['label']+' · '+env['local_time'],fonts.small,ui.MUTED,(640,636),'midbottom')
+
+    def draw_browser(self,surface,fonts):
+        self.lobby_areas=[]
+        ui.panel(surface,(330,95,620,540),(9,18,27,240))
+        ui.text(surface,'ONLINE LOBBIES',fonts.h1,ui.ACCENT,(640,112),'midtop')
+        for rect,intent,label in ((pygame.Rect(370,150,250,42),'create','CREATE LOBBY'),(pygame.Rect(660,150,250,42),'join','JOIN LOBBY')):
+            pygame.draw.rect(surface,(45,94,124) if self.lobby_intent==intent else (28,45,60),rect,border_radius=6)
+            ui.text(surface,label,fonts.body,ui.TEXT,rect.center,'center')
+        directory=getattr(self.game.network,'lobbies',[]) if self.game.network else []
+        for index,item in enumerate(directory):
+            rect=pygame.Rect(370,215+index*105,540,88)
+            ui.panel(surface,rect,(24,40,54,245))
+            ui.text(surface,item['name'],fonts.h2,ui.TEXT,(390,rect.top+12))
+            detail=f"{item['count']}/24 racers · {item['phase']}" if item['exists'] else 'Available to create'
+            ui.text(surface,detail,fonts.small,ui.MUTED,(390,rect.top+49))
+            action='join' if item['exists'] else 'create'
+            allowed=item['count']<24 and (self.lobby_intent in (None,action))
+            label='FULL' if item['count']>=24 else action.upper()
+            button=pygame.Rect(780,rect.top+22,110,42)
+            pygame.draw.rect(surface,(45,100,120) if allowed else (45,50,55),button,border_radius=5)
+            ui.text(surface,label,fonts.body,ui.TEXT if allowed else ui.DIM,button.center,'center')
+            if allowed:self.lobby_areas.append((button,action,item['id']))
+        error=getattr(self.game.network,'lobby_error','') if self.game.network else 'Connecting…'
+        ui.text(surface,error or 'Solo practice is available in every lobby.',fonts.small,ui.ALERT if error else ui.MUTED,(640,570),'midtop')
+
+    def draw_finished(self,surface,fonts,data):
+        p=self.local
+        ui.panel(surface,(350,140,580,410),(9,18,27,240))
+        ui.text(surface,'FINISHED',fonts.display,ui.ACCENT,(640,170),'midtop')
+        ui.text(surface,f"{p['finish_time']:.2f} SECONDS",fonts.h1,ui.TEXT,(640,255),'midtop')
+        label='PRACTICE · SCORES NOT RECORDED' if data.get('practice') else f"PLACE {p['place']} · {p['score']} POINTS"
+        ui.text(surface,label,fonts.h2,ui.TEXT,(640,325),'midtop')
+        if data['phase']=='racing':
+            message=f"Other racers have {data.get('finish_cutoff',0):.1f}s to finish"
+        else:message=f"Returning to lobby in {data['remaining']:.0f}s"
+        ui.text(surface,message,fonts.body,ui.MUTED,(640,395),'midtop')
+        ui.text(surface,'E brakes · Runway contact is always safe',fonts.small,ui.MUTED,(640,480),'midtop')

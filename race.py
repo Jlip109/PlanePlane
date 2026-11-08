@@ -2,6 +2,7 @@
 import math
 import random
 import time
+import uuid
 
 import world
 
@@ -9,6 +10,9 @@ RUNWAY_Y = 240.0
 START_Z = -4000.0
 FINISH_Z = 14000.0
 RACE_SECONDS = 120.0
+MAX_RACE_SECONDS = 600.0
+FINISH_GRACE_SECONDS = 30.0
+TARGET_COURSE_SPEED = 300.0
 COUNTDOWN_SECONDS = 5.0
 LANDING_BONUS = 500
 FUEL_RING_REFILL = 25.0
@@ -25,17 +29,31 @@ def spawn_for(slot):
 
 def course(seed):
     rng = random.Random(seed)
-    rings = []
-    z = START_Z+1400
-    index = 0
-    while z < FINISH_Z-1500:
-        x = math.sin(index*.62)*1500
-        y = 500 + 260*math.sin(index*.73) + rng.uniform(-70,70)
-        y = max(y,world.obstacle_height(x,z)+180)
-        rings.append(dict(x=x,y=y,z=z,radius=105 if index%2==0 else 45,
-                          kind='blue' if index%2==0 else 'red'))
-        z += rng.uniform(650,1450)
-        index += 1
+    count = 48
+    mirror = rng.choice((-1,1))
+    phase = rng.uniform(-.25,.25)
+    points=[]
+    for index in range(count):
+        t=index/(count-1)
+        u=t+.018*math.sin(t*math.tau*3+phase)*math.sin(math.pi*t)
+        x=mirror*math.sin(u*math.tau*2)*math.sin(math.pi*u)
+        z=START_Z+1100+u*(FINISH_Z-START_Z-1800)
+        y=300+4400*math.sin(math.pi*u)**2*(.78+.22*math.sin(u*math.tau+phase))
+        points.append((x,y,z))
+    def length(amplitude):
+        p=[(0,RUNWAY_Y,START_Z-650)]+[(x*amplitude,y,z) for x,y,z in points]+[(0,RUNWAY_Y,FINISH_Z)]
+        return sum(math.dist(a,b) for a,b in zip(p,p[1:]))
+    low,high=0.0,8000.0
+    for _ in range(32):
+        middle=(low+high)/2
+        if length(middle)<RACE_SECONDS*TARGET_COURSE_SPEED:low=middle
+        else:high=middle
+    rings=[]
+    for index,(x,y,z) in enumerate(points):
+        x*=high
+        y=max(y,world.obstacle_height(x,z)+120)
+        kind='red' if index%2 else 'blue'
+        rings.append(dict(x=x,y=y,z=z,radius=105 if kind=='blue' else 45,kind=kind))
     for i,ring in enumerate(rings):
         previous = rings[i-1] if i else dict(x=0,y=RUNWAY_Y,z=START_Z)
         length = math.hypot(ring['x']-previous['x'],ring['z']-previous['z'])
@@ -95,11 +113,18 @@ class RaceRoom:
         self.fuel_rings = fuel_course(self.rings)
         self.environment = None
         self.winners = []
+        self.started_at = None
+        self.first_finish_at = None
+        self.practice = False
+        self.records = []
+        self.room_id=uuid.uuid4().hex[:12]
+        self.pending_players=set()
+        self.ended_at=None
 
     def join(self, player_id, name):
         self.members[player_id] = dict(id=player_id,name=name,ready=False,connected=True,
                                       score=0,next_gate=0,status='waiting',reason='',landed=False,previous=None,
-                                      fuel_credit=0,collected_fuel=[])
+                                      fuel_credit=0,collected_fuel=[],finish_time=None,place=None,recorded=False)
 
     def leave(self, player_id):
         player = self.members.get(player_id)
@@ -110,14 +135,16 @@ class RaceRoom:
             self.disqualify(player,'Left the match')
         elif self.phase in ('lobby','loading'):
             self.members.pop(player_id,None)
-            self.phase = 'lobby'
+            if self.phase=='loading' and player_id in self.pending_players:self.phase='lobby'
+        self.pending_players.discard(player_id)
 
     def ready(self, player_id, value):
         if self.phase != 'lobby' or player_id not in self.members:
             return
         self.members[player_id]['ready'] = bool(value)
         pilots = [p for p in self.members.values() if p['connected']]
-        if len(pilots)>=2 and all(p['ready'] for p in pilots):
+        if pilots and all(p['ready'] for p in pilots):
+            self.pending_players={p['id'] for p in pilots}
             self.phase = 'loading'
 
     def prepared(self, environment):
@@ -128,9 +155,13 @@ class RaceRoom:
         self.fuel_rings = fuel_course(self.rings)
         self.environment = environment
         self.winners = []
-        for index,p in enumerate(p for p in self.members.values() if p['connected']):
+        self.started_at = self.first_finish_at = self.ended_at = None
+        participants=[p for p in self.members.values() if p['connected'] and p['id'] in self.pending_players]
+        self.practice = len(participants)==1
+        for index,p in enumerate(participants):
             p.update(status='racing',score=0,next_gate=0,reason='',landed=False,previous=None,
-                     spawn=spawn_for(index),ready=False,fuel_credit=0,collected_fuel=[])
+                     spawn=spawn_for(index),ready=False,fuel_credit=0,collected_fuel=[],
+                     finish_time=None,place=None,recorded=False)
         self.phase = 'countdown'
         self.deadline = self.clock()+COUNTDOWN_SECONDS
 
@@ -138,6 +169,7 @@ class RaceRoom:
         player.update(status='disqualified',reason=reason)
 
     def receive(self, player_id, state):
+        self.tick()
         p = self.members.get(player_id)
         if not p or self.phase != 'racing' or p['status']!='racing':
             return
@@ -159,35 +191,57 @@ class RaceRoom:
         index = p['next_gate']
         if previous and index<len(self.rings):
             ring = self.rings[index]
-            angle = (self.clock()-(self.deadline-RACE_SECONDS))*.35+(ring['x']+ring['z'])*.0001
+            angle = (self.clock()-self.started_at)*.35+(ring['x']+ring['z'])*.0001
             inside=ring_crossing(previous,state,ring,angle)
             if inside is not None:
                 if inside:
                     p['score'] += 200 if ring['kind']=='red' else 100
-                p['next_gate'] += 1
+                    p['next_gate'] += 1
         if previous:
             for ring in self.fuel_rings:
                 if ring['id'] in p['collected_fuel']:
                     continue
-                angle=(self.clock()-(self.deadline-RACE_SECONDS))*.35+(ring['x']+ring['z'])*.0001
+                angle=(self.clock()-self.started_at)*.35+(ring['x']+ring['z'])*.0001
                 if ring_crossing(previous,state,ring,angle):
                     p['collected_fuel'].append(ring['id'])
                     p['fuel_credit']+=FUEL_RING_REFILL
         if p['next_gate']==len(self.rings) and abs(state['x'])<=90 and abs(state['z']-FINISH_Z)<=900 and state['y']<=RUNWAY_Y+4:
             if state['speed']<=55 and abs(state['bank'])<.3 and abs(state['flight_pitch'])<.3:
-                p.update(score=p['score']+LANDING_BONUS,landed=True,status='finished')
+                p['score']+=LANDING_BONUS
+            self.finish_player(p)
+
+    def finish_player(self, player):
+        now=self.clock()
+        place=1+sum(p['status']=='finished' for p in self.members.values())
+        player.update(landed=True,status='finished',finish_time=max(0,now-self.started_at),
+                      place=place,recorded=not self.practice)
+        if self.first_finish_at is None:
+            self.first_finish_at=now
+            self.deadline=now+FINISH_GRACE_SECONDS
+        if not self.practice:
+            self.records.append(dict(name=player['name'],score=player['score'],time=player['finish_time'],round=self.round))
+            self.records=self.records[-240:]
+
+    def complete(self):
+        finishers=sorted((p for p in self.members.values() if p['status']=='finished'),key=lambda p:p['place'])
+        self.winners=[finishers[0]['id']] if finishers and not self.practice else []
+        self.phase='results'
+        self.ended_at=self.clock()
+        self.deadline=self.ended_at+15
 
     def tick(self):
         now = self.clock()
         if self.phase=='countdown' and now>=self.deadline:
             self.phase = 'racing'
-            self.deadline = now+RACE_SECONDS
-        elif self.phase=='racing' and now>=self.deadline:
-            eligible = [p for p in self.members.values() if p['status'] in ('racing','finished')]
-            top = max((p['score'] for p in eligible),default=None)
-            self.winners = [p['id'] for p in eligible if p['score']==top]
-            self.phase = 'results'
-            self.deadline = now+15
+            self.started_at=now
+            self.deadline = now+MAX_RACE_SECONDS
+        elif self.phase=='racing':
+            if now>=self.deadline:
+                for p in self.members.values():
+                    if p['status']=='racing':self.disqualify(p,'Did not finish in time')
+                self.complete()
+            elif not any(p['status']=='racing' for p in self.members.values()):
+                self.complete()
         elif self.phase=='results' and now>=self.deadline:
             self.members = {k:p for k,p in self.members.items() if p['connected']}
             for p in self.members.values():
@@ -196,7 +250,12 @@ class RaceRoom:
 
     def snapshot(self):
         revealed=self.phase in ('racing','results')
+        now=self.ended_at if self.ended_at is not None else self.clock()
+        elapsed=max(0,now-self.started_at) if self.started_at is not None else 0.0
         return dict(phase=self.phase,round=self.round,remaining=max(0,self.deadline-self.clock()),
+                    race_id=f'{self.room_id}-{self.round}',
+                    elapsed=elapsed,practice=self.practice,
+                    finish_cutoff=max(0,self.deadline-self.clock()) if self.first_finish_at is not None else None,
                     rings=self.rings if revealed else [],fuel_rings=self.fuel_rings if revealed else [],
                     environment=self.environment if revealed else None,winners=self.winners,
                     players=[{k:v for k,v in p.items() if k!='previous'} for p in self.members.values()])

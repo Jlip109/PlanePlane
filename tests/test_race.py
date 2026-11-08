@@ -10,7 +10,7 @@ import world
 from conftest import Keys
 from launcher import Profile,rgb
 from network import NetworkClient,RoomServer
-from race import RaceRoom,COUNTDOWN_SECONDS,RACE_SECONDS,RUNWAY_Y,FINISH_Z,LANDING_BONUS,course,spawn_for
+from race import RaceRoom,COUNTDOWN_SECONDS,RACE_SECONDS,MAX_RACE_SECONDS,RUNWAY_Y,FINISH_Z,LANDING_BONUS,course,spawn_for
 from trees import tree_sites
 
 
@@ -38,23 +38,28 @@ def state(**changes):
     return s
 
 
-def test_countdown_two_minutes_winner_and_next_lobby():
+def test_countdown_finish_ranking_and_next_lobby():
     room,now=prepared()
     now[0]=4.99;room.tick()
     assert room.phase=='countdown'
     now[0]=5;room.tick()
-    assert room.phase=='racing' and room.snapshot()['remaining']==RACE_SECONDS
-    room.members['a']['score']=300
-    room.members['b']['score']=500
-    now[0]+=RACE_SECONDS;room.tick()
+    assert room.phase=='racing' and room.snapshot()['elapsed']==0
+    now[0]+=RACE_SECONDS
+    room.members['b']['next_gate']=len(room.rings)
+    room.receive('b',state(z=FINISH_Z,speed=80))
+    assert room.snapshot()['finish_cutoff']==30
+    now[0]+=30;room.tick()
     assert room.phase=='results' and room.winners==['b']
+    assert room.members['a']['status']=='disqualified'
     now[0]+=15;room.tick()
     assert room.phase=='lobby' and not any(p['ready'] for p in room.members.values())
 
 
-def test_single_pilot_never_starts():
+def test_single_pilot_starts_practice():
     room=RaceRoom();room.join('a','Alpha');room.ready('a',True)
-    assert room.phase=='lobby'
+    assert room.phase=='loading'
+    room.prepared(environment())
+    assert room.practice
 
 
 @pytest.mark.parametrize('cause', ['crashed','left_match','area','disconnect'])
@@ -64,7 +69,9 @@ def test_disqualified_cannot_win(cause):
     if cause=='disconnect':room.leave('a')
     else:room.receive('a',state(**({'x':10000} if cause=='area' else {cause:True})))
     assert room.members['a']['status']=='disqualified'
-    now[0]+=120;room.tick()
+    room.members['b']['next_gate']=len(room.rings)
+    room.receive('b',state(z=FINISH_Z,speed=80))
+    room.tick()
     assert room.winners==['b']
 
 

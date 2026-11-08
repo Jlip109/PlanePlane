@@ -24,7 +24,8 @@ class Profile:
         self.values = [args.name or self.scores.get('username',''),args.color or self.scores.get('rgb','220, 220, 220'),
                        args.connect or self.scores.get('server',DEFAULT_SERVER)]
         self.fields = [pygame.Rect(70,125+i*95,660,44) for i in range(3)]
-        self.buttons = [(pygame.Rect(70,490,660,48),'ffa','ONLINE · FREE FOR ALL'),
+        self.buttons = [(pygame.Rect(70,490,320,48),'create','CREATE LOBBY'),
+                        (pygame.Rect(410,490,320,48),'join','JOIN LOBBY'),
                         (pygame.Rect(70,550,320,42),'free','Offline Free Roam'),
                         (pygame.Rect(410,550,320,42),'rings','Offline Ring Mode')]
         self.model = args.plane or self.scores.get('plane_model','classic')
@@ -34,6 +35,8 @@ class Profile:
         self.error = ''
 
     def select(self, mode):
+        intent=mode if mode in ('create','join') else 'join'
+        if mode in ('create','join'):mode='ffa'
         name=self.values[0].strip()
         if not name or len(name)>24:
             self.error='Choose a username from 1 to 24 characters.'
@@ -47,6 +50,9 @@ class Profile:
         self.args.color=','.join(str(v) for v in color)
         self.args.plane=self.model
         self.args.mode=mode
+        if mode=='ffa':
+            self.args.lobby_action='browse'
+            self.args.lobby_intent=intent
         self.args.connect=self.values[2].strip() if mode=='ffa' else None
         if mode=='ffa' and not self.args.connect:
             self.error='Enter the multiplayer server address.'
@@ -63,7 +69,7 @@ class Profile:
                 self.values[self.focus]=self.values[self.focus][:-1]
             if event.key==pygame.K_TAB:
                 self.focus=(self.focus+1)%3
-            if event.key==pygame.K_RETURN and self.select('ffa'):
+            if event.key==pygame.K_RETURN and self.select('join'):
                 return True
             if event.key==pygame.K_a and event.mod&pygame.KMOD_CTRL:
                 self.values[self.focus]=''
@@ -92,7 +98,7 @@ class Profile:
         for rect,_,label in self.buttons:
             pygame.draw.rect(screen,(45,94,124),rect,border_radius=6)
             text(label,(rect.x+15,rect.y+8),f=small)
-        text(self.error or 'Online races require two pilots and everyone to click READY.',(70,615),(244,179,78),small)
+        text(self.error or 'Three lobbies · 24 racers each · Solo practice does not save scores.',(70,615),(244,179,78),small)
 
 
 def launch(args):

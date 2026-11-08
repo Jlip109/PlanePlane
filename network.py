@@ -14,7 +14,7 @@ from plane import PLANE_MODELS
 from units import MAX_FLIGHT_SPEED_MPS
 from race import RaceRoom, spawn_for
 
-VERSION = 1
+VERSION = 2
 TICK_RATE = 20
 MAX_LINE = 262144
 STATE_FIELDS = ('x','y','z','heading','bank','flight_pitch','speed','fuel')
@@ -57,9 +57,52 @@ class RoomServer:
         self.server = None
         self.broadcast_task = None
         self.started = time.monotonic()
-        self.race = RaceRoom(seed)
-        self.preparation = None
+        self.rooms = {}
+        self.preparations = {}
         self.location = location
+
+    @property
+    def race(self):
+        return self.rooms.get(1)
+
+    def directory(self):
+        return [dict(id=i,name=f'Lobby {i}',exists=i in self.rooms,capacity=24,
+                     count=sum(p.get('lobby')==i for p in self.peers.values()),
+                     phase=self.rooms[i].phase if i in self.rooms else 'empty') for i in (1,2,3)]
+
+    def leave_lobby(self, player_id):
+        peer=self.peers.get(player_id)
+        if not peer:return
+        lobby=peer.get('lobby')
+        peer['lobby']=None
+        if lobby in self.rooms:
+            self.rooms[lobby].leave(player_id)
+            if not any(p.get('lobby')==lobby for p in self.peers.values()):
+                self.rooms.pop(lobby)
+                task=self.preparations.pop(lobby,None)
+                if task:task.cancel()
+
+    def join_lobby(self, player_id, action, lobby):
+        if type(lobby) is not int or lobby not in (1,2,3):
+            raise ValueError('Choose Lobby 1, 2 or 3')
+        if action not in ('create','join','auto'):
+            raise ValueError('Choose CREATE LOBBY or JOIN LOBBY')
+        if action=='create' and lobby in self.rooms:
+            raise ValueError(f'Lobby {lobby} already exists')
+        if action=='join' and lobby not in self.rooms:
+            raise ValueError(f'Lobby {lobby} does not exist yet')
+        peer=self.peers[player_id]
+        if peer.get('lobby')==lobby:
+            return
+        if sum(p.get('lobby')==lobby for p in self.peers.values())>=24:
+            raise ValueError(f'Lobby {lobby} is full (24 racers)')
+        self.leave_lobby(player_id)
+        if lobby not in self.rooms:self.rooms[lobby]=RaceRoom(self.seed+lobby*1000)
+        peer['lobby']=lobby
+        room=self.rooms[lobby]
+        room.join(player_id,peer['name'])
+        spawn=spawn_for(sum(p.get('lobby')==lobby for p in self.peers.values())-1)
+        peer['state'].update(spawn,speed=0)
 
     async def start(self, host='127.0.0.1', port=8765):
         self.server = await asyncio.start_server(self.accept,host,port,limit=4096)
@@ -95,7 +138,7 @@ class RoomServer:
             raw = await asyncio.wait_for(reader.readline(),5)
             hello = json.loads(raw)
             if not isinstance(hello,dict) or hello.get('version') != VERSION or hello.get('type') != 'join':
-                raise ValueError('Protocol version mismatch')
+                raise ValueError('Protocol version mismatch; update the game and server to the same version')
             if len(self.peers) >= self.max_players:
                 raise ValueError('Room is full')
             player_id = uuid.uuid4().hex[:12]
@@ -110,23 +153,35 @@ class RoomServer:
             state.update(color=hello.get('color',[220,220,220]))
             state = clean_state(state)
             mode = hello.get('mode','free')
-            self.peers[player_id] = {'writer':writer,'name':name,'state':state,'mode':mode}
+            self.peers[player_id] = {'writer':writer,'name':name,'state':state,'mode':mode,'lobby':None}
             if mode=='ffa':
-                self.race.join(player_id,name)
-                spawn = spawn_for(sum(p['mode']=='ffa' for p in self.peers.values())-1)
-                state.update(spawn,speed=0)
+                action=hello.get('lobby_action','auto')
+                if action!='browse':
+                    self.join_lobby(player_id,action,hello.get('lobby',1))
+                    spawn={key:state[key] for key in ('x','y','z')}
+            room=self.rooms.get(self.peers[player_id]['lobby'])
             hour = (9+(time.monotonic()-self.started)*.1) % 24
-            writer.write(encode({'type':'welcome','version':VERSION,'id':player_id,'seed':self.seed,'spawn':spawn,'hour':hour,'race':self.race.snapshot()}))
+            writer.write(encode({'type':'welcome','version':VERSION,'id':player_id,'seed':self.seed,'spawn':spawn,'hour':hour,
+                                 'race':room.snapshot() if room else None,'lobbies':self.directory(),'lobby_protocol':2}))
             await writer.drain()
             while raw := await asyncio.wait_for(reader.readline(),30):
                 message = json.loads(raw)
+                room=self.rooms.get(self.peers[player_id].get('lobby'))
+                if isinstance(message,dict) and message.get('type')=='lobby':
+                    try:
+                        if self.peers[player_id]['mode']!='ffa':raise ValueError('Lobby selection requires Free for All')
+                        if message.get('action')=='leave':self.leave_lobby(player_id)
+                        else:self.join_lobby(player_id,message.get('action'),message.get('lobby'))
+                    except ValueError as error:
+                        writer.write(encode(dict(type='lobby_error',message=str(error))))
+                    continue
                 if isinstance(message,dict) and message.get('type')=='ready':
-                    self.race.ready(player_id,message.get('ready') is True)
+                    if room:room.ready(player_id,message.get('ready') is True)
                     continue
                 if not isinstance(message,dict) or message.get('type') != 'state':
                     raise ValueError('Expected state update')
                 self.peers[player_id]['state'] = clean_state(message)
-                self.race.receive(player_id,self.peers[player_id]['state'])
+                if room:room.receive(player_id,self.peers[player_id]['state'])
         except (ValueError, OSError, asyncio.TimeoutError, ConnectionError) as error:
             if not writer.is_closing():
                 try:
@@ -135,8 +190,8 @@ class RoomServer:
                     pass
         finally:
             if player_id:
+                self.leave_lobby(player_id)
                 self.peers.pop(player_id,None)
-                self.race.leave(player_id)
             writer.close()
             try:
                 await writer.wait_closed()
@@ -145,12 +200,23 @@ class RoomServer:
 
     async def broadcast(self):
         while True:
-            self.race.tick()
-            if self.race.phase=='loading' and (self.preparation is None or self.preparation.done()):
-                self.preparation = asyncio.create_task(self.prepare_race())
-            players = [dict(peer['state'],id=player_id,name=peer['name']) for player_id,peer in self.peers.items()]
-            packet = encode({'type':'snapshot','players':players,'race':self.race.snapshot()})
+            for lobby,room in list(self.rooms.items()):
+                room.tick()
+                task=self.preparations.get(lobby)
+                if room.phase=='loading' and (task is None or task.done()):
+                    self.preparations[lobby] = asyncio.create_task(self.prepare_race(lobby,room))
+            directory=self.directory()
+            packets={}
             for peer in list(self.peers.values()):
+                lobby=peer.get('lobby')
+                key=(lobby,peer['mode'])
+                if key not in packets:
+                    players=[dict(p['state'],id=player_id,name=p['name']) for player_id,p in self.peers.items()
+                             if p.get('lobby')==lobby and p['mode']==peer['mode']]
+                    room=self.rooms.get(lobby)
+                    packets[key]=encode(dict(type='snapshot',players=players,race=room.snapshot() if room else None,
+                                             lobbies=directory,lobby=lobby))
+                packet=packets[key]
                 writer = peer['writer']
                 if writer.is_closing():
                     continue
@@ -163,16 +229,15 @@ class RoomServer:
                         writer.close()
             await asyncio.sleep(1/TICK_RATE)
 
-    async def prepare_race(self):
+    async def prepare_race(self, lobby, room):
         from climate import race_environment
-        seed=self.seed+self.race.round+int(time.time())
+        seed=self.seed+room.round+lobby+int(time.time())
         environment = await asyncio.to_thread(race_environment,seed,self.location) if self.location else await asyncio.to_thread(race_environment,seed)
-        self.race.prepared(environment)
+        if self.rooms.get(lobby) is room:room.prepared(environment)
 
     async def close(self):
-        if self.preparation:
-            self.preparation.cancel()
-            await asyncio.gather(self.preparation,return_exceptions=True)
+        for task in self.preparations.values():task.cancel()
+        await asyncio.gather(*self.preparations.values(),return_exceptions=True)
         if self.broadcast_task:
             self.broadcast_task.cancel()
             await asyncio.gather(self.broadcast_task,return_exceptions=True)
@@ -260,9 +325,12 @@ class WebSocketWriter:
 
 
 class NetworkClient:
-    def __init__(self, address, name='Pilot', model='classic', mode='free', color=(220,220,220)):
-        self.join_info = dict(type='join',version=VERSION,name=name,model=model,mode=mode,color=list(color))
+    def __init__(self, address, name='Pilot', model='classic', mode='free', color=(220,220,220), lobby=1, lobby_action='auto'):
+        self.join_info = dict(type='join',version=VERSION,name=name,model=model,mode=mode,color=list(color),lobby=lobby,lobby_action=lobby_action)
         self.race = None
+        self.lobbies = []
+        self.lobby_id = None
+        self.lobby_error = ''
         self.online = []
         self.commands = deque()
         self.websocket = None
@@ -371,7 +439,11 @@ class NetworkClient:
             with self.lock:
                 self.snapshots.append((time.monotonic(),players))
                 self.race = message.get('race')
+                self.lobbies = message.get('lobbies',[])
+                self.lobby_id = message.get('lobby')
                 self.online = [{'id':p['id'],'name':p['name']} for p in message['players']]
+        elif message.get('type')=='lobby_error':
+            self.lobby_error=str(message.get('message','Could not join lobby'))
         elif message.get('type') == 'error':
             raise ValueError(message.get('message','Server error'))
 
@@ -388,6 +460,11 @@ class NetworkClient:
     def set_ready(self, ready):
         with self.lock:
             self.commands.append(dict(type='ready',ready=bool(ready)))
+
+    def select_lobby(self, action, lobby=None):
+        self.lobby_error=''
+        with self.lock:
+            self.commands.append(dict(type='lobby',action=action,lobby=lobby))
 
     def run(self):
         next_send = 0.0
