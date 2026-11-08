@@ -150,7 +150,12 @@ menu (ESC, Main Menu) also offers **Ring Race**.
 - The server is authoritative: it only accepts one more gate at a time, from near that gate, no
   sooner than a straight Mach 5 line allows, and it times finishes itself (a client's own finish
   time is used only if it is within a second of when the server heard it).
-- `python server.py --countdown 3 --results 8` shortens the cycle for demos.
+- `python server.py --countdown 3 --results 8` shortens the cycle for demos (the countdown is at least 2 s).
+- Restart during a race puts you back on the grid or just past your last counted gate, facing the next one.
+  If you go to the menu mid-round you spectate until the next round. If the server goes away, the race
+  HUD says so and you fly on freely.
+- A new game client joining an older server still flies together with everyone (no races) and prints
+  that the server needs updating (LAN: pull and restart `server.py`; Render: redeploy).
 
 Protocol version 2 adds optional `racing`, `round`, `gates`, `finish` and `idle` fields to state
 messages and a `race` block plus server `time` to snapshots. Version 1 clients can still join and fly
