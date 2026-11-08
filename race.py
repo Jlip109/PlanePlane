@@ -193,7 +193,8 @@ class RaceDirector:
             previous = rank
             gates = len(racer['times'])
             gap = None
-            if racer is not leader and gates and len(leader['times']) >= gates and not racer['left']:
+            counted = racer['finish'] is not None or not racer['left']  # finishers keep their gap if they leave
+            if racer is not leader and gates and len(leader['times']) >= gates and counted:
                 gap = round(racer['times'][gates - 1] - leader['times'][gates - 1], 3)
             status = 'finished' if racer['finish'] is not None else ('dnf' if racer['left'] else 'racing')
             result.append({'id': player_id, 'name': racer['name'], 'place': place, 'gates': gates,

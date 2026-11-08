@@ -572,13 +572,25 @@ def connect(args):
     """Join a server, turning every failure into a one-line message with a hint instead of a traceback."""
     try:
         from network import NetworkClient
-        return NetworkClient(args.connect,args.name,args.plane or 'classic')
+        try:
+            return NetworkClient(args.connect,args.name,args.plane or 'classic')
+        except ValueError as error:
+            if 'mismatch' not in str(error):
+                raise
+            # An older server (un-updated LAN host or Render deploy): fly together without races.
+            client = NetworkClient(args.connect,args.name,args.plane or 'classic',version=1)
+            print('This server runs an older PlanePlane version: free flight works, Ring Race needs the '
+                  'server updated (LAN: pull and restart server.py; Render: redeploy).',flush=True)
+            return client
     except ModuleNotFoundError as error:
         raise SystemExit(f'Could not join server: {error}. Install it with: python -m pip install -r requirements.txt') from None
     except Exception as error:
         message = str(error) or type(error).__name__
         online = args.connect.startswith(('ws://','wss://','http://','https://'))
-        if online and ('502' in message or '503' in message):
+        if 'mismatch' in message:
+            hint = ('The server runs a different PlanePlane version. Update both to the same version '
+                    '(LAN: pull and restart server.py; Render: redeploy the service).')
+        elif online and ('502' in message or '503' in message):
             hint = 'The online server is waking up (free hosts sleep); wait a minute and try again.'
         elif online:
             hint = ('Check the address (e.g. ws://127.0.0.1:8080 or wss://NAME.onrender.com). '
@@ -631,7 +643,8 @@ def main(argv=None):
         apply_preset(atmosphere, args.preset)
     audio = None
     game = Game(atmosphere, fonts, audio, args.mode, args.seed, network=network)
-    if network:
+    if network and game.mode is not None and game.mode.key == 'free':
+        # Ring Mode keeps its offline course from the start line; Ring Race places you on its own grid.
         spawn = network.welcome['spawn']
         atmosphere.position = np.array([spawn['x'],spawn['z']])
         atmosphere.altitude = spawn['y']

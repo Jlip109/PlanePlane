@@ -606,3 +606,276 @@ def test_remote_mesh_skips_planes_behind_or_far_and_follows_daylight(atmosphere)
     atmosphere.hour = 0
     midnight = remote_aircraft_mesh([ahead], models, atmosphere)[2].mean()
     assert midnight < noon * 0.5
+
+
+# ------------------------------------------------------------------ tester findings (regressions)
+
+
+def serve_in_thread(**options):
+    loop = asyncio.new_event_loop()
+    room = RoomServer(1, **options)
+    port = loop.run_until_complete(room.start('127.0.0.1', 0))
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    return loop, room, port
+
+
+def stop_server(loop, room):
+    asyncio.run_coroutine_threadsafe(room.close(), loop).result(5)
+    loop.call_soon_threadsafe(loop.stop)
+
+
+def wait_for(condition, seconds=5):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and not condition():
+        time.sleep(.02)
+    return condition()
+
+
+def test_a_lost_server_clears_the_race_and_releases_the_grid(atmosphere, fonts, tmp_path, pg):
+    from game import Game
+    from scores import Scores
+    loop, room, port = serve_in_thread(countdown=30.0)
+    client = NetworkClient(f'127.0.0.1:{port}', 'Me')
+    try:
+        game = Game(atmosphere, fonts, None, 'race', scores=Scores(tmp_path / 's.json'), network=client)
+        client.publish(atmosphere, game.mode.progress())
+        assert wait_for(lambda: client.race_state() and client.race_state()['phase'] == 'countdown')
+        game.update(.016, .016)
+        assert game.mode.racer is not None and game.mode.target() is not None
+        stop_server(loop, room)
+        assert wait_for(lambda: client.status.startswith('Disconnected'))
+        assert client.race_state() is None
+        atmosphere.position = np.array([500., 500.])
+        game.update(.016, .016)
+        assert tuple(atmosphere.position) == (500., 500.) and game.mode.target() is None and game.mode.rings == []
+        assert game.mode.connection_problem()[0] == 'Disconnected from the race server'
+        game.draw_hud(pg.Surface((1280, 720), pg.SRCALPHA), 60, 'GPU')
+    finally:
+        client.close()
+
+
+def test_b_restart_mid_race_returns_to_your_own_progress_not_the_leader(atmosphere, fonts, tmp_path):
+    from game import Game
+    from scores import Scores
+    network = FakeNetwork(race_info('racing', [dict(id='o', name='Lead', gates=10), dict(id='me', name='Me', gates=2, place=2)]),
+                          now=140.0)
+    game = Game(atmosphere, fonts, None, 'race', scores=Scores(tmp_path / 's.json'), network=network)
+    leader = race.course(77)[9]
+    atmosphere.remote_players = [dict(clean_state(state(x=leader[0], y=leader[1], z=leader[2])), id='o', name='Lead')]
+    game.update(.016, .016)
+    game.act('restart')
+    game.update(.016, .016)
+    mode = game.mode
+    here = (atmosphere.position[0], atmosphere.altitude, atmosphere.position[1])
+    assert mode.passed == 2 and math.dist(here, mode.course[1][:3]) < 60
+    nx, nz = math.sin(atmosphere.heading), math.cos(atmosphere.heading)
+    to_gate = np.array(mode.course[2][::2][:2]) - atmosphere.position
+    assert (to_gate @ (nx, nz)) / np.linalg.norm(to_gate) > 0.99  # facing the next gate
+    assert mode.side < 0
+
+
+def test_b_ring_mode_online_matches_offline(atmosphere, fonts, tmp_path):
+    from game import Game
+    from scores import Scores
+    offline = Game(atmosphere, fonts, None, 'rings', seed=5, scores=Scores(tmp_path / 's.json'))
+    rings = list(offline.mode.rings)
+    atmosphere.remote_players = [dict(clean_state(state(x=9000., y=2000., z=9000.)), id='p', name='P')]
+    online = Game(atmosphere, fonts, None, 'rings', seed=5, scores=Scores(tmp_path / 's.json'), network=FakeNetwork())
+    assert online.mode.rings == rings
+    online.act('restart')
+    offline.act('restart')
+    assert online.mode.rings == offline.mode.rings and tuple(atmosphere.position) == (0.0, -900.0)
+
+
+def test_c_older_server_gets_a_version_one_fallback_and_a_clear_hint(monkeypatch, atmosphere, fonts, tmp_path):
+    import main
+    import network
+    from game import Game
+    from scores import Scores
+    monkeypatch.setattr(network, 'SUPPORTED_VERSIONS', (1,))
+    loop, room, port = serve_in_thread()
+    try:
+        client = main.connect(main.parse_args(['--connect', f'127.0.0.1:{port}']))
+        assert client.version == 1 and client.welcome['version'] == 1
+        game = Game(atmosphere, fonts, None, 'race', scores=Scores(tmp_path / 's.json'), network=client)
+        game.update(.016, .016)
+        assert 'older' in game.mode.connection_problem()[0]
+        client.close()
+        monkeypatch.setattr(network, 'SUPPORTED_VERSIONS', (7,))
+        with pytest.raises(SystemExit, match='different PlanePlane version'):
+            main.connect(main.parse_args(['--connect', f'127.0.0.1:{port}']))
+    finally:
+        stop_server(loop, room)
+
+
+def test_d_leaving_mid_race_makes_you_a_spectator(atmosphere, fonts, tmp_path, pg):
+    from game import Game
+    from scores import Scores
+    network = FakeNetwork(race_info('racing', [dict(id='o', name='O', gates=3), dict(id='me', name='Me', status='dnf', gates=1)]),
+                          now=130.0)
+    game = Game(atmosphere, fonts, None, 'race', scores=Scores(tmp_path / 's.json'), network=network)
+    game.update(.016, .016)
+    mode = game.mode
+    assert mode.me and mode.racer is None and mode.target() is None and len(mode.rings) == race.GATES
+    gx, gy, gz, nx, nz = mode.course[0]
+    for offset in (-30, 30):
+        atmosphere.position = np.array([gx + nx * offset, gz + nz * offset])
+        atmosphere.altitude = gy
+        game.update(.016, .016)
+    assert mode.passed == 0
+    surface = pg.Surface((1280, 720), pg.SRCALPHA)
+    game.draw_hud(surface, 60, 'GPU')
+    assert mode.place_text(mode.me, network.info) == '–'
+
+
+def test_e_rollback_reaims_so_the_next_frame_is_not_a_missed_gate(atmosphere, fonts, tmp_path):
+    from game import Game
+    from scores import Scores
+    flashes = []
+    network = FakeNetwork(race_info('racing', [dict(id='me', name='Me')]), now=110.0)
+    game = Game(atmosphere, fonts, None, 'race', scores=Scores(tmp_path / 's.json'), network=network)
+    game.flash = lambda text, color: flashes.append(text)
+    mode = game.mode
+    game.update(.016, .016)
+    for gate in range(2):
+        gx, gy, gz, nx, nz = mode.course[gate]
+        for offset in (-30, 30):
+            atmosphere.position = np.array([gx + nx * offset, gz + nz * offset])
+            atmosphere.altitude = gy
+            game.update(.016, .016)
+    assert mode.passed == 2
+    for _ in range(200):
+        game.update(.016, .016)
+    assert mode.passed == 0 and flashes[-1] == 'GATE NOT CONFIRMED'
+    assert mode.side > 0  # past gate 1 now; flying on must not count as missing it
+
+
+def test_f_countdown_clamped_and_hold_released_on_the_server_clock(atmosphere, fonts, tmp_path):
+    import server
+    from game import Game
+    from scores import Scores
+    assert server.parse_args(['--countdown', '0']).countdown == server.MIN_COUNTDOWN
+    assert server.parse_args(['--countdown', '7']).countdown == 7
+    network = FakeNetwork(race_info('countdown', [dict(id='me', name='Me')]), now=99.0)
+    game = Game(atmosphere, fonts, None, 'race', scores=Scores(tmp_path / 's.json'), network=network)
+    game.update(.016, .016)
+    assert tuple(atmosphere.position) == (race.grid_slot(0)[0], race.grid_slot(0)[2])
+    network.now = 100.05  # start time reached, the racing snapshot has not arrived yet
+    atmosphere.position = np.array([1., 2.])
+    game.update(.016, .016)
+    assert tuple(atmosphere.position) == (1., 2.) and game.mode.started
+
+
+def test_g_hostile_input_never_takes_the_server_down():
+    finished = race_info('results', [dict(id='a', status='finished', finish=None)])
+    with pytest.raises(ValueError, match='without a time'):
+        clean_race(finished)
+
+    async def scenario():
+        room = RoomServer()
+        port = await room.start(port=0)
+        try:
+            calls = []
+            original = room.race.snapshot
+
+            def flaky(now):
+                calls.append(now)
+                if len(calls) == 1:
+                    raise RuntimeError('boom')
+                return original(now)
+            room.race.snapshot = flaky
+
+            def attack(payloads):
+                replies = []
+                for payload in payloads:
+                    with socket.create_connection(('127.0.0.1', port), timeout=5) as raw:
+                        raw.sendall(payload)
+                        replies.append(raw.makefile().readline())
+                return replies
+            join = encode({'type': 'join', 'version': 2, 'name': 'X'})
+            replies = await asyncio.to_thread(attack, [
+                b'{"type":"join","version":true}\n',
+                join + b'{"type":"state","x":1' + b'0' * 400 + b',"y":700}\n',
+                join + b'[' * 5000 + b'\n'])
+            assert 'mismatch' in replies[0]
+            assert all(reply for reply in replies)
+            client = await asyncio.to_thread(NetworkClient, f'127.0.0.1:{port}', 'Fine')
+            client.publish(SimpleNamespace(position=np.array([0., 0.]), altitude=800., heading=0., bank=0.,
+                                           flight_pitch=0., speed=75., fuel=90., plane_id='classic'))
+            for _ in range(40):
+                await asyncio.sleep(.05)
+                if client.race_state() is not None:
+                    break
+            assert client.status == 'Connected' and client.race_state() is not None and len(calls) > 1
+            await asyncio.to_thread(client.close)
+        finally:
+            await room.close()
+    asyncio.run(scenario())
+
+
+def test_h_pilot_labels_stay_clear_of_hud_panels_and_each_other(atmosphere, fonts, tmp_path, pg):
+    import pygame
+    from game import Game
+    from hud import HUD_ZONES, PilotMarkers
+    from scores import Scores
+    atmosphere.position = np.array([0., 0.])
+    atmosphere.altitude, atmosphere.heading = 1000., 0.
+    game = Game(atmosphere, fonts, None, 'free', scores=Scores(tmp_path / 's.json'), network=FakeNetwork())
+    atmosphere.remote_players = [dict(id=f'p{i}', name=f'Pilot number {i} long', x=4000. + i * 10, y=1000. + i * 400,
+                                      z=-200. + i * 100, model='classic') for i in range(4)]
+    atmosphere.remote_players.append(dict(id='l', name='W' * 24, x=-3000., y=1000., z=-1500., model='classic'))
+    overlay = pg.Surface((1280, 720), pg.SRCALPHA)
+    PilotMarkers(game).draw_world(overlay, atmosphere)
+    assert overlay.get_bounding_rect().width > 0
+    for zone in HUD_ZONES:
+        rect = pygame.Rect(zone)
+        assert overlay.subsurface(rect).get_bounding_rect().width == 0, zone
+    taken = [pygame.Rect(0, 0, 50, 50)]
+    assert PilotMarkers.free(pygame.Rect(0, 0, 20, 20), taken, pygame.Rect(0, 0, 200, 200), 20).top >= 50
+
+
+def test_h_finished_line_sits_below_the_finish_flash():
+    import inspect
+    import modes
+    assert "(640, 214)" in inspect.getsource(modes.RaceMode.draw_progress)
+
+
+def test_i_my_row_is_always_on_the_board_and_no_ordinals_before_the_start(atmosphere, fonts, tmp_path, pg):
+    from game import Game
+    from hud import PilotMarkers
+    from scores import Scores
+    rows = [dict(id=f'p{i}', name=f'P{i}', place=i + 1, status='finished', finish=60. + i, gates=12) for i in range(14)]
+    rows[12] = dict(id='me', name='Me', place=13, status='finished', finish=72., gates=12)
+    network = FakeNetwork(race_info('results', rows), now=105.0)
+    game = Game(atmosphere, fonts, None, 'race', scores=Scores(tmp_path / 's.json'), network=network)
+    game.update(.016, .016)
+    shown, _ = game.mode.visible_rows(network.info['standings'], 10)
+    assert len(shown) == 10 and shown[-1]['id'] == 'me' and shown[0]['id'] == 'p0'
+    game.draw_hud(pg.Surface((1280, 720), pg.SRCALPHA), 60, 'GPU')
+    network.info = race_info('countdown', [dict(id='me', name='Me'), dict(id='o', name='O', place=1)], start=110.0)
+    game.update(.016, .016)
+    assert game.mode.place_text(network.info['standings'][1], network.info) == '–'
+    assert PilotMarkers(game).places() == {}
+    network.info = race_info('racing', [dict(id='o', name='O'), dict(id='x', name='X', place=2, status='dnf')])
+    game.update(.016, .016)
+    assert PilotMarkers(game).places() == {'o': 1}
+
+
+@pytest.mark.parametrize('raw,expected', [
+    ('Zoë🚀太郎', 'Zoë'), ('José ‮ evil', 'José evil'), ('𝕏𝕏𝕏', 'Pilot'), ('\U0001F600' * 24, 'Pilot'),
+    ('A' * 30, 'A' * 24), ('Ж‍Ж', 'ЖЖ'), ('  Ann   Lee ', 'Ann Lee'), ('é', 'é'), (42, '42')])
+def test_j_names_keep_only_what_the_hud_font_can_draw(raw, expected):
+    from network import clean_name
+    assert clean_name(raw) == expected
+
+
+def test_finishers_who_leave_keep_their_gap():
+    director = race.RaceDirector(seed=3, countdown=0, gates=2)
+    peers = {'a': ('Ann', True), 'b': ('Bo', True)}
+    director.tick(0.0, peers)
+    director.tick(0.0, peers)
+    for player, offset in (('a', 0.0), ('b', 2.5)):
+        assert through(director, player, 1, 3.0 + offset) and through(director, player, 2, 6.0 + offset)
+    director.remove('b')
+    entry = director.standings()[1]
+    assert entry['status'] == 'finished' and entry['gap'] == pytest.approx(2.5)

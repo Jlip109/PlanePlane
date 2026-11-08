@@ -8,6 +8,7 @@ import select
 import socket
 import threading
 import time
+import unicodedata
 import uuid
 
 from plane import PLANE_MODELS
@@ -21,6 +22,20 @@ INTERPOLATION_DELAY = .1
 LEAD = .15  # extrapolate remote planes this far ahead so formation partners appear where they really are
 MAX_LINE = 262144
 STATE_FIELDS = ('x','y','z','heading','bank','flight_pitch','speed','fuel')
+
+
+def clean_name(value, fallback='Pilot'):
+    """A display name the HUD font can draw: Latin, Greek and Cyrillic letters, digits and plain punctuation.
+    Emoji, CJK, invisible format characters (bidi overrides, zero-width joiners) and combining marks are dropped."""
+    text = unicodedata.normalize('NFC',str(value))
+    kept = []
+    for char in text:
+        code = ord(char)
+        category = unicodedata.category(char)
+        if category[0] in 'CM' or category == 'So' or not (code < 0x0530 or 0x1E00 <= code <= 0x1EFF):
+            continue
+        kept.append(' ' if category[0] == 'Z' else char)
+    return ' '.join(''.join(kept).split())[:24].strip() or fallback
 
 
 def encode(message):
@@ -97,7 +112,7 @@ def clean_race(info):
     for entry in standings:
         if not isinstance(entry,dict) or entry.get('status') not in ('racing','finished','dnf'):
             raise ValueError('Invalid standing')
-        clean = {'id': str(entry.get('id',''))[:24], 'name': str(entry.get('name',''))[:24], 'status': entry['status']}
+        clean = {'id': str(entry.get('id',''))[:24], 'name': clean_name(entry.get('name','')), 'status': entry['status']}
         for name,limit in (('place',100),('gates',race.GATES),('slot',100)):
             value = entry.get(name)
             if isinstance(value,bool) or not isinstance(value,int) or not 0 <= value <= limit:
@@ -108,6 +123,8 @@ def clean_race(info):
             if value is not None and (isinstance(value,bool) or not isinstance(value,(float,int)) or not math.isfinite(value)):
                 raise ValueError(f'Invalid standing {name}')
             clean[name] = None if value is None else float(value)
+        if clean['status'] == 'finished' and clean['finish'] is None:
+            raise ValueError('Finished standing without a time')
         result['standings'].append(clean)
     return result
 
@@ -157,12 +174,13 @@ class RoomServer:
         try:
             raw = await asyncio.wait_for(reader.readline(),5)
             hello = json.loads(raw)
-            if not isinstance(hello,dict) or hello.get('version') not in SUPPORTED_VERSIONS or hello.get('type') != 'join':
+            version = hello.get('version') if isinstance(hello,dict) else None
+            if isinstance(version,bool) or version not in SUPPORTED_VERSIONS or hello.get('type') != 'join':
                 raise ValueError('Protocol version mismatch')
             if len(self.peers) >= self.max_players:
                 raise ValueError('Room is full')
             player_id = uuid.uuid4().hex[:12]
-            name = ''.join(c for c in str(hello.get('name','Pilot')) if c.isprintable())[:24] or 'Pilot'
+            name = clean_name(hello.get('name','Pilot'))
             model = hello.get('model','classic')
             if not isinstance(model,str) or model not in PLANE_MODELS:
                 raise ValueError('Unknown aircraft')
@@ -181,7 +199,7 @@ class RoomServer:
                 state = clean_state(message)
                 self.peers[player_id]['state'] = state
                 self.race.report(player_id,state,time.monotonic())
-        except (ValueError, OSError, asyncio.TimeoutError, ConnectionError) as error:
+        except Exception as error:  # bad JSON, absurd numbers (OverflowError), deep nesting (RecursionError), I/O
             if not writer.is_closing():
                 try:
                     writer.write(encode({'type':'error','message':str(error)}))
@@ -212,9 +230,15 @@ class RoomServer:
 
     async def broadcast(self):
         while True:
-            now = self.tick_race()
-            players = [dict(peer['state'],id=player_id,name=peer['name']) for player_id,peer in self.peers.items()]
-            packet = encode({'type':'snapshot','players':players,'time':now,'race':self.race.snapshot(now)})
+            try:
+                now = self.tick_race()
+                players = [dict(peer['state'],id=player_id,name=peer['name']) for player_id,peer in self.peers.items()]
+                packet = encode({'type':'snapshot','players':players,'time':now,'race':self.race.snapshot(now)})
+            except Exception as error:
+                # One bad tick must never stop the room; log it and try again next tick.
+                print(f'PlanePlane server: snapshot failed: {error!r}',flush=True)
+                await asyncio.sleep(1/TICK_RATE)
+                continue
             for peer in list(self.peers.values()):
                 writer = peer['writer']
                 if writer.is_closing():
@@ -316,8 +340,9 @@ class WebSocketWriter:
 
 
 class NetworkClient:
-    def __init__(self, address, name='Pilot', model='classic'):
+    def __init__(self, address, name='Pilot', model='classic', version=VERSION):
         self.websocket = None
+        self.version = version  # 1 joins an older server for free flight only
         if address.startswith(('ws://','wss://','http://','https://')):
             self.connect_websocket(address,name,model)
             return
@@ -328,7 +353,7 @@ class NetworkClient:
             raise ValueError('Server port must be between 1 and 65535')
         self.socket = socket.create_connection((host,int(port)),timeout=5)
         self.socket.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1)
-        self.socket.sendall(encode({'type':'join','version':VERSION,'name':name,'model':model}))
+        self.socket.sendall(encode({'type':'join','version':self.version,'name':name,'model':model}))
         self.pending = bytearray()
         try:
             while b'\n' not in self.pending:
@@ -340,7 +365,7 @@ class NetworkClient:
                     raise ValueError('Server response too large')
             line,_,rest = self.pending.partition(b'\n')
             self.welcome = json.loads(line)
-            if self.welcome.get('type') != 'welcome' or self.welcome.get('version') != VERSION:
+            if self.welcome.get('type') != 'welcome' or self.welcome.get('version') != self.version:
                 raise ValueError(self.welcome.get('message','Invalid welcome message'))
             self.pending = bytearray(rest)
         except Exception:
@@ -369,9 +394,9 @@ class NetworkClient:
         # Entered as a context manager (newer websockets warn otherwise); closed explicitly in close().
         self.websocket = connect(url,open_timeout=75,close_timeout=1,max_size=MAX_LINE).__enter__()
         try:
-            self.websocket.send(encode({'type':'join','version':VERSION,'name':name,'model':model}).decode().strip())
+            self.websocket.send(encode({'type':'join','version':self.version,'name':name,'model':model}).decode().strip())
             self.welcome = json.loads(self.websocket.recv(timeout=15))
-            if self.welcome.get('type') != 'welcome' or self.welcome.get('version') != VERSION:
+            if self.welcome.get('type') != 'welcome' or self.welcome.get('version') != self.version:
                 raise ValueError(self.welcome.get('message','Invalid welcome message'))
         except TimeoutError as error:
             self.websocket.close()
@@ -421,7 +446,7 @@ class NetworkClient:
             players = {}
             for item in message['players']:
                 state = clean_state(item)
-                players[str(item['id'])] = dict(state,id=str(item['id']),name=str(item['name'])[:24])
+                players[str(item['id'])] = dict(state,id=str(item['id']),name=clean_name(item['name']))
             race_info = clean_race(message['race']) if 'race' in message else None
             with self.lock:
                 self.snapshots.append((time.monotonic(),players))
@@ -443,6 +468,9 @@ class NetworkClient:
         return time.monotonic()+(self.clock_offset or 0.0)
 
     def race_state(self):
+        """The latest race block, or None once the connection is gone (never a stale, frozen race)."""
+        if not self.status.startswith('Connected'):
+            return None
         with self.lock:
             return self.race
 

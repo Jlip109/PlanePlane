@@ -260,7 +260,7 @@ class RaceMode(RingRun):
     def __init__(self, game):
         super().__init__(game, 0)
         self.info = None
-        self.me = None
+        self.me = self.racer = None
         self.round = None
         self.course = []
 
@@ -269,11 +269,12 @@ class RaceMode(RingRun):
         self.active = True
         self.score, self.passed, self.combo, self.best_combo = 0, 0, 1, 1
         self.time_left = 0.0
-        self.info, self.me, self.round = None, None, None
+        self.info, self.me, self.racer, self.round = None, None, None, None
         self.course, self.rings = [], []
         self.finish_time = None
         self.clock = 0.0
         self.unconfirmed = 0.0
+        self.placed = False
         self.side = -1.0
         self.previous_position = plane_point(atmosphere)
 
@@ -281,39 +282,65 @@ class RaceMode(RingRun):
     def phase(self):
         return self.info['phase'] if self.info else 'connecting'
 
+    @property
+    def started(self):
+        """The race is on: the server says so, or its clock has reached the start already."""
+        return self.phase == 'racing' or (self.phase == 'countdown' and self.clock >= 0)
+
+    def connection_problem(self):
+        network = self.game.network
+        if network is None or not network.status.startswith('Connected'):
+            return 'Disconnected from the race server', network.status if network else ''
+        if getattr(network, 'version', 2) < 2:
+            return 'This server is an older PlanePlane version', 'Free flight works; update the server for Ring Race.'
+        return None
+
     def load_round(self, info, atmosphere):
         self.round = info['round']
         self.course = race.course(info['seed'], info['gates'])
         self.passed = 0
         self.finish_time = None
         self.unconfirmed = 0.0
-        self.side = self.ring_side(atmosphere, self.course[0]) if self.course else -1.0
+        self.placed = False
+        self.aim(atmosphere)
+
+    def aim(self, atmosphere):
+        """Measure which side of the next gate we are on; needed whenever the next gate changes."""
+        if self.passed < len(self.course):
+            self.side = self.ring_side(atmosphere, self.course[self.passed])
+        self.previous_position = plane_point(atmosphere)
 
     def update(self, dt, atmosphere):
         Mode.update(self, dt, atmosphere)
         network = self.game.network
-        self.info = info = network.race_state() if network else None
+        self.info = info = network.race_state() if network and not self.connection_problem() else None
         if info is None:
-            self.me, self.rings = None, []
+            self.me = self.racer = None
+            self.rings = []
             return
         phase = info['phase']
         if phase in ('countdown', 'racing') and info['round'] != self.round:
             self.load_round(info, atmosphere)
         self.me = next((entry for entry in info['standings'] if entry['id'] == network.player_id), None)
         current = self.round == info['round']
-        if self.me and current:
-            self.sync(self.me, dt)
+        # Someone who left this round (menu and back) is a spectator until the next one.
+        self.racer = self.me if self.me and current and self.me['status'] != 'dnf' else None
+        if self.racer:
+            self.sync(self.racer, dt, atmosphere)
         self.clock = network.server_time() - info['start']
-        if phase == 'countdown' and self.me and current:
+        if self.racer and phase == 'countdown' and not self.started:
             self.hold(atmosphere)
-        elif (phase == 'racing' and self.me and current and self.me['status'] == 'racing'
+        elif (self.racer and self.started and self.racer['status'] == 'racing'
               and self.finish_time is None and self.passed < len(self.course)):
+            if not self.placed:
+                self.place(atmosphere)
             self.track_gate(atmosphere)
         self.previous_position = plane_point(atmosphere)
         self.rings = self.course[self.passed:] if phase in ('countdown', 'racing') and current else []
 
-    def sync(self, me, dt):
+    def sync(self, me, dt, atmosphere):
         """The server is authoritative: adopt its count, and undo a local pass it never accepted."""
+        before = self.passed
         if me['gates'] > self.passed:
             self.passed = me['gates']
         if me['finish'] is not None:
@@ -325,18 +352,33 @@ class RaceMode(RingRun):
                 self.game.flash('GATE NOT CONFIRMED', ui.ALERT)
         else:
             self.unconfirmed = 0.0
+        if self.passed != before:
+            self.aim(atmosphere)
 
-    def hold(self, atmosphere):
-        """Park the plane on its starting-grid slot until the countdown ends."""
-        x, y, z, heading = race.grid_slot(self.me['slot'])
+    def put(self, atmosphere, x, y, z, heading):
         atmosphere.position = np.array([x, z])
         atmosphere.altitude, atmosphere.heading = y, heading
         atmosphere.speed = atmosphere.CRUISE_SPEED * atmosphere.speed_scale
         atmosphere.vertical_speed = atmosphere.bank = atmosphere.flight_pitch = 0.0
         atmosphere.crash_timer = 0.0
+        self.aim(atmosphere)
+
+    def hold(self, atmosphere):
+        """Park the plane on its starting-grid slot until the countdown ends."""
+        self.put(atmosphere, *race.grid_slot(self.racer['slot']))
         atmosphere.fuel = 100.0
-        if self.course:
-            self.side = self.ring_side(atmosphere, self.course[0])
+        self.placed = True
+
+    def place(self, atmosphere):
+        """(Re)starting mid-race: the grid if no gate counts yet, else just past the last gate, facing the next."""
+        if self.passed == 0:
+            self.put(atmosphere, *race.grid_slot(self.racer['slot']))
+        else:
+            x, y, z, nx, nz = self.course[self.passed - 1]
+            x, z = x + nx * 40, z + nz * 40
+            target = self.course[self.passed]
+            self.put(atmosphere, x, y, z, math.atan2(target[0] - x, target[2] - z))
+        self.placed = True
 
     def track_gate(self, atmosphere):
         ring = self.course[self.passed]
@@ -361,7 +403,7 @@ class RaceMode(RingRun):
         return {'round': self.round or 0, 'gates': self.passed, 'finish': self.finish_time}
 
     def target(self):
-        if (self.me and self.phase in ('countdown', 'racing') and self.finish_time is None
+        if (self.racer and self.phase in ('countdown', 'racing') and self.finish_time is None
                 and self.passed < len(self.course)):
             x, y, z, _, _ = self.course[self.passed]
             return x, y, z, 'GATE'
@@ -381,18 +423,22 @@ class RaceMode(RingRun):
     def banner(self, surface, fonts, message, detail=''):
         ui.text(surface, message, fonts.h2, ui.TEXT, (640, 112), 'midtop', tracking=1, shadow=True)
         if detail:
-            ui.text(surface, detail, fonts.small, ui.MUTED, (640, 146), 'midtop', shadow=True)
+            ui.text(surface, detail[:90], fonts.small, ui.MUTED, (640, 146), 'midtop', shadow=True)
 
     def draw_hud(self, surface, atmosphere, fonts):
-        info, me, phase = self.info, self.me, self.phase
+        problem = self.connection_problem()
+        if problem:
+            self.banner(surface, fonts, *problem)
+            return
+        info, phase = self.info, self.phase
         if info is None:
             self.banner(surface, fonts, 'Connecting to the race server…')
             return
         total = info['gates']
         if phase == 'waiting':
             self.banner(surface, fonts, 'Waiting for the next round…')
-        elif phase == 'countdown':
-            if me:
+        elif phase == 'countdown' and not self.started:
+            if self.racer:
                 count = max(1, math.ceil(-self.clock))
                 pulse = 1 - (-self.clock) % 1
                 ui.text(surface, str(count), fonts.display, ui.ACCENT, (640, 236), 'center', shadow=True,
@@ -402,12 +448,14 @@ class RaceMode(RingRun):
                 self.draw_board(surface, fonts, info)
             else:
                 self.banner(surface, fonts, f'Joining round {info["round"]}…')
-        elif phase == 'racing':
-            if me:
+        elif phase in ('countdown', 'racing'):
+            if self.racer:
                 if self.clock < 1.2:
                     ui.text(surface, 'GO!', fonts.display, ui.GOOD, (640, 236), 'center', shadow=True,
                             alpha=255 * max(0, 1 - max(0, self.clock) / 1.2))
-                self.draw_progress(surface, fonts, info, me)
+                self.draw_progress(surface, fonts, info, self.racer)
+            elif self.me and self.me['status'] == 'dnf':
+                self.banner(surface, fonts, 'You left this round', "You'll join the next one.")
             else:
                 self.banner(surface, fonts, 'Race in progress', 'You join the next round. Watch the leaders or fly the course.')
             self.draw_board(surface, fonts, info)
@@ -424,27 +472,42 @@ class RaceMode(RingRun):
         shown = self.finish_time if self.finish_time is not None else self.clock
         ui.text(surface, race_clock(shown), fonts.mono, ui.GOOD if self.finish_time is not None else ui.TEXT, (686, 126))
         if self.finish_time is not None:
-            ui.text(surface, 'Finished  ·  waiting for the others', fonts.small, ui.GOOD, (640, 170), 'midtop', shadow=True)
+            # Below the FINISHED flash (y 176-206) so the two never overlap.
+            ui.text(surface, 'Finished  ·  waiting for the others', fonts.small, ui.GOOD, (640, 214), 'midtop', shadow=True)
+
+    def place_text(self, entry, info):
+        """Ordinals only once the race is under way, and never for pilots who left."""
+        if entry['status'] == 'dnf' or (info['phase'] == 'countdown' and not self.started):
+            return '–'
+        return race.ordinal(entry['place'])
 
     def standing_value(self, entry, total):
-        if entry['status'] == 'finished':
+        if entry['status'] == 'finished' and entry['finish'] is not None:
             return race_clock(entry['finish'])
         if entry['status'] == 'dnf':
             return 'DNF'
         return f'{entry["gates"]}/{total}'
 
+    def visible_rows(self, standings, count):
+        """The top rows, with my own row swapped in last when I am further down."""
+        my_id = self.game.network.player_id if self.game.network else None
+        rows = list(standings[:count])
+        mine = next((entry for entry in standings[count:] if entry['id'] == my_id), None)
+        if mine:
+            rows[-1] = mine
+        return rows, my_id
+
     def draw_board(self, surface, fonts, info):
-        standings = info['standings'][:8]
+        standings, my_id = self.visible_rows(info['standings'], 8)
         if not standings:
             return
-        my_id = self.game.network.player_id if self.game.network else None
         box = pygame.Rect(1256 - 280, 124, 280, 40 + 26 * len(standings))
         ui.panel(surface, box)
         ui.label(surface, f'Race  ·  round {info["round"]}', fonts.tiny, (box.left + 16, box.top + 12), ui.ACCENT)
         y = box.top + 34
         for entry in standings:
             color = ui.ACCENT if entry['id'] == my_id else ui.TEXT
-            ui.text(surface, race.ordinal(entry['place']), fonts.mono_small, color, (box.left + 16, y))
+            ui.text(surface, self.place_text(entry, info), fonts.mono_small, color, (box.left + 16, y))
             ui.text(surface, entry['name'][:12], fonts.small, color, (box.left + 62, y))
             gap = f'+{entry["gap"]:.1f}s' if entry['gap'] else ''
             ui.text(surface, gap, fonts.mono_small, ui.MUTED, (box.right - 82, y), 'topright')
@@ -452,8 +515,7 @@ class RaceMode(RingRun):
             y += 26
 
     def draw_results(self, surface, fonts, info):
-        standings = info['standings'][:10]
-        my_id = self.game.network.player_id if self.game.network else None
+        standings, my_id = self.visible_rows(info['standings'], 10)
         box = pygame.Rect(640 - 270, 150, 540, 140 + 34 * max(1, len(standings)))
         ui.panel(surface, box, (9, 18, 27, 232))
         ui.label(surface, f'Round {info["round"]} results', fonts.tiny, (box.left + 36, box.top + 28), ui.ACCENT)
@@ -462,7 +524,7 @@ class RaceMode(RingRun):
         y = box.top + 108
         for entry in standings:
             color = ui.ACCENT if entry['id'] == my_id else ui.TEXT
-            ui.text(surface, race.ordinal(entry['place']), fonts.mono, color, (box.left + 36, y))
+            ui.text(surface, self.place_text(entry, info), fonts.mono, color, (box.left + 36, y))
             ui.text(surface, entry['name'], fonts.body, color, (box.left + 100, y))
             if entry['gap'] and entry['status'] == 'finished':
                 ui.text(surface, f'+{entry["gap"]:.2f}s', fonts.mono_small, ui.MUTED, (box.right - 150, y + 3), 'topright')

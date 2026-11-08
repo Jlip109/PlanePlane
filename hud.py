@@ -204,20 +204,55 @@ def marker(atmosphere, point, size, margin=40):
     return 'edge', width / 2 + dx * stretch, height / 2 + dy * stretch, math.atan2(dy, dx)
 
 
+# HUD areas (1280x720 HUD coordinates) that pilot labels must not cover: gauges, heading tape, race board,
+# map and key hints. The countdown adds its number and caption.
+HUD_ZONES = [(990, 0, 290, 114), (420, 8, 440, 92), (966, 118, 300, 262), (0, 440, 244, 280),
+             (0, 18, 430, 34), (880, 640, 400, 80), (490, 96, 300, 72)]
+COUNTDOWN_ZONE = (400, 186, 480, 130)
+
+
 class PilotMarkers:
     """Name tags over other pilots and edge-of-screen arrows toward the ones out of view.
 
-    A main-loop system: draw_world() paints the window-sized overlay that both renderers composite."""
+    A main-loop system: draw_world() paints the window-sized overlay that both renderers composite.
+    Labels avoid the HUD panels and each other; nearer pilots get the first pick of space."""
 
     def __init__(self, game):
         self.game = game
 
+    def race_mode(self):
+        mode = self.game.mode
+        return mode if mode is not None and mode.key == 'race' else None
+
     def places(self):
+        """Race places to show in tags: only once a race is running or finished, never for pilots who left."""
         network = self.game.network
         info = network.race_state() if network else None
-        if not info or info['phase'] == 'waiting':
+        mode = self.race_mode()
+        if not info or info['phase'] not in ('racing', 'results', 'countdown'):
             return {}
-        return {entry['id']: entry['place'] for entry in info['standings']}
+        if info['phase'] == 'countdown' and not (mode and mode.started):
+            return {}
+        return {entry['id']: entry['place'] for entry in info['standings'] if entry['status'] != 'dnf'}
+
+    def zones(self, size):
+        scale, ox, oy = self.game.hud_transform
+        boxes = list(HUD_ZONES)
+        mode = self.race_mode()
+        if mode and mode.phase == 'countdown' and not mode.started:
+            boxes.append(COUNTDOWN_ZONE)
+        return [pygame.Rect(round(x * scale + ox), round(y * scale + oy), round(w * scale), round(h * scale))
+                for x, y, w, h in boxes]
+
+    @staticmethod
+    def free(rect, taken, bounds, step, horizontal=False, tries=8):
+        """Slide rect along one axis (inside bounds) to the nearest spot clear of everything taken."""
+        for index in range(tries * 2 + 1):
+            shift = (index + 1) // 2 * step * (1 if index % 2 else -1)
+            moved = rect.move((shift, 0) if horizontal else (0, shift)).clamp(bounds)
+            if moved.collidelist(taken) < 0:
+                return moved
+        return None
 
     def draw_world(self, surface, atmosphere):
         if self.game.state not in ('flying', 'paused', 'results') or not atmosphere.remote_players:
@@ -226,25 +261,44 @@ class PilotMarkers:
         fonts = self.game.fonts
         places = self.places()
         size = surface.get_size()
+        bounds = surface.get_rect().inflate(-8, -8)
+        taken = self.zones(size)
         eye = atmosphere.camera
-        for player in atmosphere.remote_players:
+        pilots = sorted(atmosphere.remote_players, key=lambda p: math.dist(eye, (p['x'], p['y'], p['z'])))
+        for player in pilots:
             point = (player['x'], player['y'] + 3, player['z'])
-            distance = math.dist(eye, point)
             name = player['name']
             if player['id'] in places:
                 name = f'{ordinal(places[player["id"]])}  {name}'
             where = marker(atmosphere, point, size)
-            reach = ui.format_distance(distance)
+            reach = ui.format_distance(math.dist(eye, point))
+            name_image = ui.render(name, fonts.small if where[0] == 'tag' else fonts.tiny, ui.TEXT)
+            reach_image = ui.render(reach, fonts.tiny, PILOT_COLOR)
+            label = pygame.Rect(0, 0, max(name_image.get_width(), reach_image.get_width()) + 6,
+                                name_image.get_height() + reach_image.get_height())
             if where[0] == 'tag':
                 _, x, y = where
                 pygame.draw.polygon(surface, PILOT_COLOR, [(x, y - 4), (x - 7, y - 14), (x + 7, y - 14)])
-                ui.text(surface, name, fonts.small, ui.TEXT, (x, y - 18), 'midbottom', shadow=True)
-                ui.text(surface, reach, fonts.tiny, PILOT_COLOR, (x, y - 36), 'midbottom', shadow=True)
+                label.midbottom = (x, y - 16)
+                spot = self.free(label, taken, bounds, -label.height // 2 or -8, tries=3)
             else:
                 _, x, y, angle = where
                 c, s = math.cos(angle), math.sin(angle)
+                along_x = abs(c) < abs(s)  # arrow on the top or bottom edge slides sideways
+                arrow = pygame.Rect(0, 0, 34, 34)
+                arrow.center = (x, y)
+                moved = self.free(arrow, taken, bounds, 18, along_x, tries=30)
+                if moved:
+                    x, y = moved.center
+                    arrow = moved
                 tip = (x + c * 16, y + s * 16)
                 pygame.draw.polygon(surface, PILOT_COLOR, [tip, (x - s * 10, y + c * 10), (x + s * 10, y - c * 10)])
-                lx, ly = x - c * 26, y - s * 26
-                ui.text(surface, name, fonts.tiny, ui.TEXT, (lx, ly - 8), 'center', shadow=True)
-                ui.text(surface, reach, fonts.tiny, PILOT_COLOR, (lx, ly + 8), 'center', shadow=True)
+                label.center = (x - c * (22 + label.width / 2), y - s * (16 + label.height / 2))
+                taken.append(arrow)
+                spot = self.free(label, taken, bounds, label.height // 2 or 8, along_x)
+            if spot is None:
+                continue  # no clear room: the marker alone still shows the way
+            taken.append(spot)
+            ui.text(surface, name, fonts.small if where[0] == 'tag' else fonts.tiny, ui.TEXT,
+                    (spot.centerx, spot.top), 'midtop', shadow=True)
+            ui.text(surface, reach, fonts.tiny, PILOT_COLOR, (spot.centerx, spot.bottom), 'midbottom', shadow=True)

@@ -10,7 +10,7 @@ from network import RoomServer
 
 async def serve(args):
     room = RoomServer(args.seed,args.max_players,hour=args.hour,day_length=args.day_length,
-                      countdown=max(0.0,args.countdown),results=max(0.0,args.results))
+                      countdown=args.countdown,results=args.results)
     if args.websocket is None:
         port = await room.start(args.host,args.port)
         print(f'PlanePlane server listening on {args.host}:{port}',flush=True)
@@ -23,7 +23,10 @@ async def serve(args):
         await room.close()
 
 
-if __name__ == '__main__':
+MIN_COUNTDOWN = 2.0  # enough for every client to see the grid and park on it
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--host',default='127.0.0.1')
     parser.add_argument('--port',type=int,default=8765)
@@ -35,9 +38,16 @@ if __name__ == '__main__':
     parser.add_argument('--results',type=float,default=12.0,help='Seconds the Ring Race results stay up')
     parser.add_argument('--websocket',type=int,nargs='?',const=8080,default=None,metavar='PORT',
                         help='Serve over WebSocket for online play (cloud hosts set $PORT)')
+    args = parser.parse_args(argv)
+    args.countdown = max(MIN_COUNTDOWN,args.countdown)
+    args.results = max(1.0,args.results)
+    return args
+
+
+if __name__ == '__main__':
     if os.environ.get('PORT') and '--websocket' not in sys.argv:
         sys.argv += ['--host','0.0.0.0','--websocket',os.environ['PORT']]
     try:
-        asyncio.run(serve(parser.parse_args()))
+        asyncio.run(serve(parse_args()))
     except KeyboardInterrupt:
         pass
