@@ -90,8 +90,21 @@ class Hud:
         if atmosphere.cycle_paused:
             clock += '  (paused)'
         weather = 'Live weather' if atmosphere.weather_label.startswith('LIVE') else 'Simulated weather'
-        ui.text(surface, f'{weather}  ·  {clock}  ·  {SEASONS[atmosphere.ground_mode]}',
+        if atmosphere.weather_label=='MAP REVEALS AT GO':
+            weather='Unknown location · Reveals at GO'
+        if atmosphere.weather_label.startswith('WEATHER UNAVAILABLE'):
+            weather = 'Weather unavailable'
+        if atmosphere.temperature_f is not None:
+            weather += f' · {atmosphere.air_temperature_f:.0f}°F air'
+        season=f'  ·  {SEASONS[atmosphere.ground_mode]}' if atmosphere.temperature_f is None else ''
+        ui.text(surface, f'{weather}  ·  {clock}{season}',
                 fonts.small, ui.TEXT, (24, 28), shadow=True)
+        if atmosphere.weather_label.startswith(('LIVE WEATHER','WEATHER UNAVAILABLE')):
+            location=atmosphere.weather_label.removeprefix('LIVE WEATHER ').removeprefix('WEATHER UNAVAILABLE ')
+            condition=getattr(atmosphere,'weather_condition','')
+            if condition:
+                location+=f' · {condition} · Wind {atmosphere.wind*MPH_PER_MPS:.0f} mph'
+            ui.text(surface,location,fonts.tiny,ui.MUTED,(24,54),shadow=True)
 
     def draw_readouts(self, surface, atmosphere, refueling=False):
         fonts = self.fonts

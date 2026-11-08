@@ -37,18 +37,21 @@ def gl():
 
 
 @pytest.mark.parametrize('season', [0, 1, 2])
-def test_gpu_and_cpu_terrain_agree(gl, season):
+@pytest.mark.parametrize('temperature', [None,100,68,31,0])
+def test_gpu_and_cpu_terrain_agree(gl, season, temperature):
     program = gl.program(vertex_shader=VERTEX, fragment_shader=PROBE_SHADER)
     quad = gl.buffer(np.array([-1,-1,1,-1,-1,1,1,1], dtype='f4').tobytes())
     vao = gl.vertex_array(program, [(quad, '2f', 'in_position')])
     target = gl.texture((32,32), 4, dtype='f4')
     fbo = gl.framebuffer([target]); fbo.use()
     program['season'] = season
+    program['temperature_grass'] = temperature is not None
+    program['temperature_f'] = temperature or 0
     vao.render(5)
     pixels = np.frombuffer(fbo.read(components=4, dtype='f4'), dtype='f4').reshape(32,32,4)
     y,x = np.mgrid[:32,:32]
     x,z = (x+.5-16)*137, (y+.5-16)*137
-    colors,_ = world.land_color_np(x,z,np.ones(x.shape),season,0)
+    colors,_ = world.land_color_np(x,z,np.ones(x.shape),season,0,temperature)
     assert np.allclose(pixels[:,:,:3],colors,atol=1e-5)
     assert np.allclose(pixels[:,:,3],world.ground_height_np(x,z),atol=.002)
     for resource in (fbo,target,vao,quad,program): resource.release()

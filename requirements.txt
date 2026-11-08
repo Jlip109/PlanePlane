@@ -3,3 +3,4 @@ pygame-ce>=2.5.8; python_version >= "3.14"  # pygame has no 3.14 wheels yet
 numpy>=2.2,<3
 moderngl>=5.12,<6
 websockets>=13
+tzdata>=2025.1

@@ -12,6 +12,7 @@ from menu import Menu
 from modes import FreeFlight, RingRun
 from scores import Scores
 from plane import PLANE_MODELS
+from online_mode import OnlineRace
 
 START = {'position': (0.0, -900.0), 'altitude': 700.0, 'heading': 0.0}
 MENU_STATES = ('title',)
@@ -33,13 +34,15 @@ class Game:
         atmosphere.plane_id = saved_plane if saved_plane in PLANE_MODELS else 'classic'
         self.hud = Hud(fonts)
         self.modes = {'free': FreeFlight(self), 'rings': RingRun(self, seed)}
+        if mode=='ffa':
+            self.modes['ffa']=OnlineRace(self,seed)
         self.mode = None
         self.hud_transform = (1.0, 0, 0)
         self.menu = Menu(self, fonts)
         self.state = 'title'
         self.quit_requested = False
         self.refueling = False
-        self.frame_limit = 60
+        self.frame_limit = 0
         self.network = None
         if mode in self.modes:
             self.start(mode)
@@ -85,6 +88,12 @@ class Game:
         self.sound('start')
 
     def to_title(self):
+        if self.mode and self.mode.key=='ffa':
+            self.atmosphere.left_match=True
+            self.atmosphere.race_frozen=True
+            if self.network:
+                self.network.close()
+                self.network=None
         self.state = 'title'
         self.mode = None
         self.atmosphere.autopilot = True
@@ -100,7 +109,10 @@ class Game:
         elif action == 'resume':
             self.state = 'flying'
         elif action == 'restart':
-            self.start(self.mode.key if self.mode else 'free')
+            if self.mode and self.mode.key=='ffa':
+                self.to_title()
+            else:
+                self.start(self.mode.key if self.mode else 'free')
         elif action == 'quit':
             self.quit_requested = True
         elif action in ('frame_limit', 'fps_up', 'fps_down'):
@@ -109,6 +121,8 @@ class Game:
             self.cycle_aircraft()
 
     def handle_event(self, event):
+        if self.mode and self.mode.key=='ffa' and self.state=='flying':
+            self.mode.event(event)
         if event.type == pygame.KEYDOWN and event.key == pygame.K_F8:
             self.cycle_aircraft()
             return
@@ -155,6 +169,8 @@ class Game:
 
     def update(self, dt, sim_dt):
         atmosphere = self.atmosphere
+        if self.mode and self.mode.key=='ffa':
+            self.mode.sync(atmosphere)
         self.menu.update(dt)
         self.hud.update(sim_dt)
         if self.audio:

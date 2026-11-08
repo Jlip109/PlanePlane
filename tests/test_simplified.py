@@ -77,15 +77,15 @@ def test_removed_mode_is_rejected():
 
 def test_frame_limit_cycles_in_pause_and_flight(atmosphere, fonts, tmp_path):
     game = make_game(atmosphere, fonts, tmp_path, 'free')
+    assert game.frame_limit == 0
+    press(game, pygame.K_F7)
     assert game.frame_limit == 60
     press(game, pygame.K_F7)
     assert game.frame_limit == 120
-    press(game, pygame.K_F7)
-    assert game.frame_limit == 0
     press(game, pygame.K_ESCAPE)
     game.menu.pause_index = next(i for i, item in enumerate(menu.PAUSE_ITEMS) if item[0] == 'frame_limit')
     press(game, pygame.K_LEFT)
-    assert game.frame_limit == 120
+    assert game.frame_limit == 60
 
 
 def test_drag_buttons_share_camera_capture(pg):

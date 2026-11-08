@@ -87,12 +87,12 @@ def test_ws_response_increases_across_entire_slider(pg):
 
 
 @pytest.mark.parametrize('key, direction', [(pygame.K_w, 1), (pygame.K_s, -1)])
-def test_ws_100_has_triple_movement(pg, key, direction):
+def test_ws_100_has_faster_high_setting_movement(pg, key, direction):
     a = main.Atmosphere(pg)
     a.flight_tuning['climb'] = 100
     for _ in range(60):
         a.update(1/60, Keys({key: 1}))
-    assert a.vertical_speed*direction == pytest.approx(main.CLIMB_RATE*3, rel=.001)
+    assert a.vertical_speed*direction == pytest.approx(main.CLIMB_RATE*6, rel=.001)
 
 
 @pytest.mark.parametrize('setting, drag, keys, attribute', [
@@ -113,7 +113,7 @@ def test_tuning_applies_while_mouse_steering(pg, setting, drag, keys, attribute)
     assert results[1] > results[0]*1.1
 
 
-def test_mouse_climb_100_has_triple_movement_for_same_aim(pg):
+def test_mouse_climb_100_has_same_high_setting_multiplier(pg):
     results = []
     for value in (0, 100):
         a = main.Atmosphere(pg)
@@ -123,4 +123,4 @@ def test_mouse_climb_100_has_triple_movement_for_same_aim(pg):
         for _ in range(1200):
             a.update(1/60, Keys())
         results.append(a.vertical_speed)
-    assert results[1] == pytest.approx(results[0]*3, rel=.001)
+    assert results[1] == pytest.approx(results[0]*6, rel=.001)

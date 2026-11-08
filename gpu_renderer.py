@@ -487,6 +487,8 @@ class GPURenderer:
         uniforms = {
             'resolution': size, 'position': (camera_x, camera_z),
             'drift': tuple(atmosphere.drift), 'altitude': camera_y, 'season': atmosphere.ground_mode,
+            'temperature_grass': atmosphere.temperature_f is not None,
+            'temperature_f': atmosphere.temperature_f if atmosphere.temperature_f is not None else 0.0,
             'heading': heading, 'pitch': pitch, 'time': atmosphere.elapsed,
             'phase': atmosphere.phase, 'cover': atmosphere.cover,
             'sun_direction': tuple(atmosphere.sun_direction), 'moon_direction': tuple(atmosphere.moon_direction),

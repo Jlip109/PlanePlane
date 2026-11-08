@@ -8,9 +8,22 @@ WATER = 15.0
 MASK = 0xFFFFFFFF
 TILE_SIZE = 160.0
 CITY_RENDER_DISTANCE = 3000.0
+RUNWAY_CENTERS = (-4000.0,14000.0)
+RUNWAY_HEIGHT = 240.0
+GRASS_PALETTE = np.load(Path(__file__).parent/'assets'/'grass_palette.npy',allow_pickle=False)
+
+
+def temperature_column(temperature_f):
+    return int(np.clip(math.floor((100-temperature_f)/3.125),0,31))
+
+
+def on_runway(x,z):
+    return abs(x)<=90 and any(abs(z-center)<=900 for center in RUNWAY_CENTERS)
 
 
 def raw_terrain(x, z):
+    if on_runway(x,z):
+        return RUNWAY_HEIGHT
     return 100 + 130 * math.sin(x / 1700) * math.cos(z / 1500)
 
 
@@ -69,18 +82,24 @@ def season_palette(season):
 
 
 def raw_terrain_np(x, z):
-    return 100 + 130 * np.sin(np.asarray(x) / 1700) * np.cos(np.asarray(z) / 1500)
+    x,z = np.asarray(x),np.asarray(z)
+    height = 100 + 130 * np.sin(x / 1700) * np.cos(z / 1500)
+    runway = (np.abs(x)<=90)&((np.abs(z+4000)<=900)|(np.abs(z-14000)<=900))
+    return np.where(runway,RUNWAY_HEIGHT,height)
 
 
 def ground_height_np(x, z):
     return np.maximum(raw_terrain_np(x, z), WATER)
 
 
-def land_color_np(x, z, distance, season, night):
+def land_color_np(x, z, distance, season, night, temperature_f=None):
     palette = np.array(season_palette(season), dtype=np.float32)
     i, j = np.floor(x / TILE_SIZE), np.floor(z / TILE_SIZE)
     pick = np.minimum((hash01_np(i, j, 41) * 4).astype(np.int32), 3)
     color = palette[pick] * (0.85 + 0.30 * hash01_np(i, j, 44))[..., None]
+    if temperature_f is not None:
+        row = np.minimum((hash01_np(i,j,45)*GRASS_PALETTE.shape[1]).astype(int),GRASS_PALETTE.shape[1]-1)
+        color = GRASS_PALETTE[temperature_column(temperature_f),row]*(0.85+0.30*hash01_np(i,j,44))[...,None]
     water = raw_terrain_np(x, z) < WATER
     lake = np.array([0.75, 0.82, 0.88] if season == 2 else [0.10, 0.22, 0.32])
     return np.where(water[..., None], lake, color), np.zeros(np.shape(x), dtype=np.float32)
@@ -91,7 +110,8 @@ def glsl_source():
     for season in range(3):
         for rgb in season_palette(season)[:4]:
             colors.append('vec3(' + ','.join(str(float(v)) for v in rgb) + ')')
-    return 'const float WATER = 15.0;\nconst vec3 FIELD_COLORS[12] = vec3[12](' + ','.join(colors) + ');\n' + GLSL_FUNCTIONS
+    grass = ','.join('vec3('+','.join(str(float(c)) for c in color)+')' for color in GRASS_PALETTE.reshape(-1,3))
+    return 'const float WATER = 15.0;\nconst vec3 FIELD_COLORS[12] = vec3[12](' + ','.join(colors) + ');\nconst vec3 GRASS_COLORS[256] = vec3[256]('+grass+');\nuniform bool temperature_grass;\nuniform float temperature_f;\n' + GLSL_FUNCTIONS
 
 
 BUILDING_CATALOG = json.loads((Path(__file__).parent/'assets'/'buildings'/'catalog.json').read_text(encoding='utf-8'))
@@ -105,6 +125,14 @@ for city_index,(cx,cz) in enumerate(CITY_CENTERS):
             x,z = cx+(column-1.5)*65,cz+(row-1)*70
             quarter_turn = (row+column)%2
             width,depth = (info['depth'],info['width']) if quarter_turn else (info['width'],info['depth'])
+            # Move the entire footprint onto dry land, retaining the building count.
+            for attempt in range(100):
+                if all(raw_terrain(x+dx,z+dz)>WATER for dx in (-width/2,0,width/2) for dz in (-depth/2,0,depth/2)):
+                    break
+                x += 35
+                z += 20
+            else:
+                continue
             level = max(ground_height(x+dx,z+dz) for dx in (-width/2,width/2) for dz in (-depth/2,depth/2))
             BUILDINGS.append(dict(x=x,y=level,z=z,width=width,depth=depth,height=info['height'],
                                   model=variant,heading=quarter_turn*math.pi/2,city=city_index))
@@ -126,6 +154,7 @@ float hash01(int x, int z, int seed) {
 }
 
 float raw_terrain(vec2 p) {
+    if (abs(p.x)<=90.0 && (abs(p.y+4000.0)<=900.0 || abs(p.y-14000.0)<=900.0)) return 240.0;
     return 100.0 + 130.0 * sin(p.x / 1700.0) * cos(p.y / 1500.0);
 }
 
@@ -135,6 +164,11 @@ vec3 land_color(vec2 p, float dist, out float light) {
     ivec2 cell = ivec2(floor(p / 160.0));
     int pick = min(int(hash01(cell.x, cell.y, 41) * 4.0), 3);
     vec3 color = FIELD_COLORS[season * 4 + pick] * (0.85 + 0.30 * hash01(cell.x, cell.y, 44));
+    if (temperature_grass) {
+        int column = int(clamp(floor((100.0-temperature_f)/3.125),0.0,31.0));
+        int row = min(int(hash01(cell.x,cell.y,45)*8.0),7);
+        color = GRASS_COLORS[column*8+row]*(0.85+0.30*hash01(cell.x,cell.y,44));
+    }
     if (raw_terrain(p) < WATER)
         color = season == 2 ? vec3(0.75,0.82,0.88) : vec3(0.10,0.22,0.32);
     light = 0.0;

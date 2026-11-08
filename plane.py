@@ -8,7 +8,8 @@ import numpy as np
 
 from camera import SCREEN_SCALE, view_angles, view_origin, project_polygon
 
-PLANE_MODELS = {'classic': ('Original', 'plane_mesh.npz'), 'f15': ('F-15', 'f15_mesh.npz')}
+PLANE_MODELS = {'classic': ('Original', 'plane_mesh.npz'), 'f15': ('F-15', 'f15_mesh.npz'),
+                'odd': ('Plane Odd', 'odd_mesh.npz')}
 
 
 def remote_aircraft_mesh(players, models, atmosphere):
@@ -23,7 +24,8 @@ def remote_aircraft_mesh(players, models, atmosphere):
         light = .45 + .55 * np.maximum(0,normal @ atmosphere.sun_direction)
         positions.append(model.positions @ rotation.T + center)
         normals.append(normal)
-        colors.append(model.colors * light[:,None])
+        tint = np.array(player.get('color',(220,220,220)),dtype=float)/220
+        colors.append(np.clip(model.base_colors*tint,0,1) * light[:,None])
     if not positions:
         return None
     return tuple(np.concatenate(values).astype('f4') for values in (positions,normals,colors))
@@ -58,8 +60,12 @@ class PlaneModel:
             self.positions = mesh['positions'].astype(np.float32)
             self.normals = mesh['normals'].astype(np.float32)
             self.colors = mesh['colors'].astype(np.float32)
+        self.base_colors = self.colors.copy()
         self.shadow_size = np.maximum(np.abs(self.positions[:,[0,2]]).max(axis=0) * 8, 1)
         self.shadow_levels = self.make_shadow()
+
+    def set_color(self, color):
+        self.colors = np.clip(self.base_colors*np.array(color,dtype='f4')/220,0,1).astype('f4')
 
     def make_shadow(self):
         import pygame

@@ -9,6 +9,75 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
+The launcher asks for a username, RGB plane colour, aircraft and server address before
+connecting. **Online · Free for All** defaults to `wss://planeplane.onrender.com`.
+Offline Free Roam and Ring Mode remain available. Framerate defaults to uncapped.
+
+## Online Free for All
+
+The server and every player must run this update. Push the changes and redeploy the
+Render service before joining; an older server cannot run the new lobby protocol.
+No terminal commands are needed after the launcher opens.
+
+At least two pilots join the lobby, whose scrollable list shows everyone in the room.
+Everyone clicks **READY** (or presses Enter). The server displays “Waiting for the match
+to finalize” while it loads a shared course and weather, then places pilots on the
+starting runway for a five-second countdown. Hold Space to accelerate, then W or
+left-mouse upward steering to take off. The username is reserved while connected;
+duplicate names are rejected, and disconnecting frees the name.
+
+Each race lasts 120 seconds. Blue rings award 100 points, smaller red rings award 200.
+The course changes altitude and spacing, with turns that reward careful steering.
+Landing on the finish runway after traversing the course awards 500 bonus points
+when speed is at most 123 mph and the wings and nose are nearly level. Releasing
+Space while on the runway brakes the aircraft. Runway contact cannot cause a crash,
+including fast or hard arrivals; a fast arrival does not earn the landing bonus.
+
+Crashing, leaving the match, disconnecting, or straying more than 5,906 feet from the
+3D course disqualifies the pilot from winning. Highest eligible score wins; ties share
+the win. Results show for 15 seconds before everyone returns to the READY lobby.
+Late arrivals wait for the next round. The offline Ring Mode Range slider does not
+change this shared competitive boundary. Pausing does not stop the online race clock.
+
+The server randomly chooses a real location and requests its current Open-Meteo weather.
+The location and course are withheld from clients throughout loading and the countdown,
+then revealed together at GO. The runway staging area uses neutral weather until then.
+Everyone shares that weather and the location's current local time, frozen for the round.
+Weather failure is labelled explicitly; local time still comes from the city's timezone.
+Terrain and cities remain procedural rather than geographic reconstructions.
+The location pool is Karachi, Saratoga Springs, Los Angeles, Nuuk, Tokyo, Stockholm,
+Cairo, Darwin and Honolulu. To pin one while testing, start the server with, for example:
+
+```powershell
+python server.py --websocket 8080 --location "Darwin, Australia"
+```
+
+`temperature.py` applies a standard tropospheric lapse rate of about 3.57°F per
+1,000 feet above the race runway's weather reference elevation. The HUD shows air
+temperature; the ground palette and tree species use the observed surface temperature.
+This is an atmosphere approximation, not a prediction of local inversions. The model
+is based on the [NASA Glenn atmosphere reference](https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/earth-atmosphere-equation-metric/).
+Warmer air increases fuel use modestly (about +6% at 100°F versus 59°F); this fuel
+modifier is a game rule. Green fuel rings sit off the scoring route, refill 5 US gallons
+(capped at a full tank), and award zero points. Each pilot can collect each fuel ring
+once per round, independently of other pilots. Fuel collection is scored by the server.
+
+The supplied 32-column grass palette selects column 0 at 100°F or hotter, moving right
+one column per 3.125°F drop, capped at column 31 at 0°F or colder. Grass polygons keep
+single colours sampled from that column. Trees 1 and 2 grow only on green dry grass;
+below 32°F, Tree3 replaces them on dry land. Trees avoid water, runways and buildings,
+and city building footprints are moved off water. Trees are distance-culled sprites.
+
+Original, F-15 and Plane Odd are selectable and share Mach 5 flight physics for now.
+W/S response at 100 now has twice the previous top vertical speed (six times the base
+rate); mouse and emergency keyboard inputs still add and use the same tuning.
+
+To bypass the launcher for a local server test:
+
+```powershell
+python main.py --mode ffa --connect ws://127.0.0.1:8080 --name PilotOne --plane odd --color "255,0,0"
+```
+
 Choose **Free Roam** to explore or **Ring Mode** to fly through ten-sided 3D gates.
 Clear gates before the timer runs out to gain time and build a score multiplier.
 Blue gates have larger openings (105-metre radius); red gates are smaller
@@ -54,7 +123,7 @@ W/S response controls both vertical motion and nose smoothing: 0 eases in slowly
 (about six seconds to 95% climb rate), while 100 responds almost immediately
 (about 0.15 seconds). It also changes how quickly the plane levels off after release.
 The maximum W/S climb and descent speed scales from the original speed at 0
-to triple that speed at 100, with intermediate settings scaling proportionally.
+to six times that speed at 100, with intermediate settings scaling proportionally.
 These sliders also apply while holding left click: climb response and movement
 use the W/S setting, turns use the A/D setting, and Space acceleration uses the
 acceleration setting while mouse steering is active.
@@ -124,11 +193,12 @@ To test online mode locally: `python server.py --websocket 8080` and `python mai
 a minute to wake, so open `https://YOUR-SERVICE.onrender.com/health` a few minutes before a demo
 (the game also waits up to 75 s when connecting).
 
-This is a LAN multiplayer foundation with client-simulated flight. Competitive authority,
-authentication, matchmaking, shared scoring and cross-player collisions are future work.
-Ring scoring currently runs locally on each client.
+Free for All lobby, scoring, readiness, timer, disqualification and winners are server-owned.
+Flight positions are still simulated by clients; this is not a cheat-resistant authoritative
+flight server. Authentication, multiple simultaneous rooms and cross-player collisions are
+future work. Offline Ring Mode scores remain local.
 
-Both selectable models use the same flight physics. The original `.blend` / `.blend1` files
+All selectable models use the same flight physics. The original `.blend` / `.blend1` files
 and runtime `.npz` exports are under `assets/`; Blender is only needed when exporting a new model.
 
 ## Tests

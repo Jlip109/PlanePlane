@@ -12,6 +12,7 @@ import numpy as np
 import world
 from camera import view_angles, view_origin
 from units import FEET_PER_METRE, SPEED_OF_SOUND_MPS, MAX_FLIGHT_SPEED_MPS
+import temperature
 
 DEFAULT_PITCH = 0.03
 PRESETS = {  # cover, wind, precipitation, storm
@@ -122,6 +123,11 @@ class Atmosphere:
         self.wireframe = False
         self.mouse_steering = False
         self.flight_tuning = {'climb':60,'acceleration':50,'steering':50}
+        self.plane_color = (220,220,220)
+        self.race_frozen = False
+        self.left_match = False
+        self.temperature_f = None
+        self.temperature_reference_altitude = 0.0
         self.shadow_model = None
         self.plane_id = 'classic'
         self.remote_players = []
@@ -164,6 +170,10 @@ class Atmosphere:
         return view_origin(self)
 
     @property
+    def air_temperature_f(self):
+        return temperature.at_altitude(self.temperature_f,self.altitude,self.temperature_reference_altitude)
+
+    @property
     def climb_response_rate(self):
         # 0: a two-second time constant; 100: 0.05 seconds. Higher is faster.
         response_time = 2.0 * (0.05 / 2.0) ** (self.flight_tuning['climb'] / 100)
@@ -171,7 +181,7 @@ class Atmosphere:
 
     @property
     def climb_rate(self):
-        return CLIMB_RATE * (1 + 2*self.flight_tuning['climb']/100)
+        return CLIMB_RATE * (1 + 5*self.flight_tuning['climb']/100)
 
     @property
     def vertical_acceleration(self):
@@ -264,7 +274,7 @@ class Atmosphere:
         press = self.autopilot_keys() if self.autopilot else keys.__getitem__
         if self.crashed:
             press = NoKeys().__getitem__
-            self.crash_timer -= dt
+            self.crash_timer -= 0 if self.race_frozen else dt
             if self.crash_timer <= 0:
                 self.respawn()
         self.fly(dt, press)
@@ -280,6 +290,9 @@ class Atmosphere:
 
     def fly(self, dt, press):
         pg = self.pg
+        if self.race_frozen:
+            self.speed = self.vertical_speed = 0.0
+            return
         if self.crashed:
             self.speed = 0.0
             self.vertical_speed = 0.0
@@ -317,6 +330,7 @@ class Atmosphere:
             self.look_target_yaw = (self.look_target_yaw-changed+math.pi) % math.tau-math.pi
         emergency_burn = .18 * (abs(keyboard_turn) + abs(keyboard_climb))
         burn = 0.08 + 0.48 * self.boosting / self.boost_scale + max(0, climb) * 0.06 + emergency_burn
+        burn *= temperature.fuel_multiplier(self.air_temperature_f)
         self.fuel = max(0.0, self.fuel - burn * dt)
         response_ease = 1-math.exp(-dt*self.climb_response_rate)
         vertical_change = (climb*self.climb_rate-self.vertical_speed)*response_ease
@@ -327,7 +341,13 @@ class Atmosphere:
         self.altitude = min(self.altitude + self.vertical_speed * dt, MAX_ALTITUDE)
         self.position += np.array([math.sin(self.heading), math.cos(self.heading)]) * self.speed * dt
         floor = world.obstacle_height(self.position[0], self.position[1])
-        if self.altitude < floor + 1.5:
+        if world.on_runway(*self.position):
+            self.altitude = max(self.altitude,floor+3)
+            if self.altitude<=floor+4 and self.vertical_speed<=0:
+                self.vertical_speed = self.flight_pitch = 0.0
+                if not self.boosting:
+                    self.speed = max(0,self.speed-100*dt)
+        elif self.altitude < floor + 1.5:
             self.altitude = floor + 1.5
             self.crash()
 
@@ -426,7 +446,7 @@ class Atmosphere:
             distance = np.maximum(0, (world.ground_height_np(x, z) - camera_y) / safe_dy)
             x, z = camera_x + rx * distance, camera_z + rz * distance
         range_metres = distance * np.sqrt(rx * rx + safe_dy * safe_dy + rz * rz)
-        color, lamps = world.land_color_np(x, z, range_metres, self.ground_mode, night)
+        color, lamps = world.land_color_np(x, z, range_metres, self.ground_mode, night,self.temperature_f)
         daylight = float(smoothstep(-0.12, 0.35, self.sun_direction[1]))
         light = 0.09 + daylight * 0.85
         ground = color * light * 255
@@ -505,15 +525,16 @@ def apply_preset(atmosphere, name):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description='Plane\u00b2: a flight through a living sky.')
-    parser.add_argument('--mode', choices=['menu', 'free', 'rings'], default='menu',
+    parser.add_argument('--mode', choices=['menu', 'free', 'rings','ffa'], default='menu',
                         help='Skip the title screen and start a mode')
     parser.add_argument('--headless', action='store_true')
     parser.add_argument('--renderer', choices=['auto', 'gpu', 'cpu'], default='auto')
-    parser.add_argument('--fps', type=int, default=60, help='Frame cap. Use 0 for uncapped benchmarking.')
+    parser.add_argument('--fps', type=int, default=0, help='Frame cap. Default 0 is uncapped.')
     parser.add_argument('--wireframe', action='store_true', help='Start with wireframe rendering')
-    parser.add_argument('--plane', choices=['classic','f15'], default=None, help='Aircraft model')
+    parser.add_argument('--plane', choices=['classic','f15','odd'], default=None, help='Aircraft model')
     parser.add_argument('--connect', help='Join a multiplayer server: HOST:PORT on a LAN, or wss://... online')
-    parser.add_argument('--name', default='Pilot', help='Multiplayer display name')
+    parser.add_argument('--name', default=None, help='Multiplayer display name; normally entered in the launcher')
+    parser.add_argument('--color', help='Plane RGB, e.g. "255,0,0"')
     parser.add_argument('--frames', type=int, default=0)
     parser.add_argument('--fullscreen', action='store_true')
     parser.add_argument('--mute', action='store_true')
@@ -568,16 +589,32 @@ def open_window(pygame, args):
 
 def main(argv=None):
     args = parse_args(argv)
+    if not args.headless and not args.name and not args.frames:
+        from launcher import launch
+        if not launch(args):
+            return
+    from launcher import rgb, DEFAULT_SERVER
+    try:
+        color=rgb(args.color or '220,220,220')
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    if args.mode=='ffa' and not args.connect:
+        args.connect=DEFAULT_SERVER
     network = None
     if args.connect:
         from network import NetworkClient
         print(f'Connecting to {args.connect} ...', flush=True)
         try:
-            network = NetworkClient(args.connect,args.name,args.plane or 'classic')
+            network = NetworkClient(args.connect,args.name or 'Pilot',args.plane or 'classic',args.mode,color)
         except (OSError,ValueError) as error:
             raise SystemExit(f'Could not join server: {error}') from error
         args.seed = network.welcome['seed']
+        import atexit
+        atexit.register(network.close)
         args.hour = network.welcome['hour']
+        if args.mode=='ffa' and 'race' not in network.welcome:
+            network.close()
+            raise SystemExit('This server needs the Free for All update. Redeploy the latest code on Render.')
         if args.mode == 'menu':
             args.mode = 'free'
     use_gpu = args.renderer == 'gpu' or (args.renderer == 'auto' and not args.headless)
@@ -596,6 +633,8 @@ def main(argv=None):
     window = pygame.display.get_surface()
     fonts = Fonts()
     atmosphere = Atmosphere(pygame)
+    atmosphere.plane_color=color
+    atmosphere.temperature_f=None
     atmosphere.third_person = args.camera == 'third'
     atmosphere.hour = args.hour % 24
     if args.time is not None:
@@ -619,7 +658,10 @@ def main(argv=None):
         atmosphere.altitude = float(np.clip(args.altitude / FEET_PER_METRE, 180, MAX_ALTITUDE))
     systems = build_systems(args)
     from plane import PlaneModel, remote_aircraft_mesh
-    models = {name: PlaneModel(name) for name in ('classic','f15')}
+    from plane import PLANE_MODELS
+    models = {name: PlaneModel(name) for name in PLANE_MODELS}
+    for model in models.values():
+        model.set_color(color)
     if args.plane:
         atmosphere.plane_id = args.plane
     plane = models[atmosphere.plane_id]
@@ -628,6 +670,8 @@ def main(argv=None):
         gpu.set_plane(plane)
     from cities import CityScene
     cities = CityScene()
+    from trees import Trees
+    trees=Trees()
     if gpu:
         gpu.set_cities(cities.batches)
     clock = pygame.time.Clock()
@@ -684,6 +728,8 @@ def main(argv=None):
         if not game.flying and display_controls.mouse_looking:
             display_controls.grab_mouse(False)
         sim_dt = 0.0 if game.paused else dt
+        if game.mode and game.mode.key=='ffa':
+            game.mode.sync(atmosphere)
         if plane.model_id != atmosphere.plane_id:
             plane = models[atmosphere.plane_id]
             atmosphere.shadow_model = plane
@@ -703,7 +749,7 @@ def main(argv=None):
         if width > 0 and height > 0:
             atmosphere.aspect = width / height
             shade = game.scene_shade()
-            world_mesh = game.mode.world_mesh(atmosphere) if game.mode and game.mode.key == 'rings' and game.state in ('flying','paused') else None
+            world_mesh = game.mode.world_mesh(atmosphere) if game.mode and game.mode.key in ('rings','ffa') and game.state in ('flying','paused') else None
             remote_mesh = remote_aircraft_mesh(atmosphere.remote_players,models,atmosphere)
             if remote_mesh is not None:
                 world_mesh = remote_mesh if world_mesh is None else tuple(
@@ -717,11 +763,13 @@ def main(argv=None):
                 if not args.headless and game.frame_limit > 0:
                     gpu.adapt(clock.get_fps(), dt, game.frame_limit)
                 gpu.render(atmosphere, (width, height), world_mesh)
+                trees.draw_gpu(gpu,atmosphere,(width,height))
                 gpu.draw_shade(*shade)
             else:
                 window = pygame.display.get_surface()
                 view = atmosphere.render()
                 pygame.transform.smoothscale(view, (width, height), window)
+                trees.draw_cpu(window,atmosphere)
                 plane.draw_world(window, atmosphere, world_mesh)
                 key = ((width, height), shade)
                 if shade_cache[0] != key:
@@ -767,7 +815,9 @@ def main(argv=None):
     call_systems(systems, 'close')
     if network:
         network.close()
+        atexit.unregister(network.close)
     display_controls.grab_mouse(False)
+    trees.close()
     if gpu:
         gpu.close()
     pygame.quit()

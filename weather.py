@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.request
 
 import pygame
+import world
 
 GEOCODE_URL = 'https://geocoding-api.open-meteo.com/v1/search'
 FORECAST_URL = 'https://api.open-meteo.com/v1/forecast'
@@ -79,13 +80,13 @@ def rain_from_code(code):
 def current_weather(latitude, longitude):
     data = fetch_json(FORECAST_URL, {
         'latitude': latitude, 'longitude': longitude, 'timezone': 'auto', 'wind_speed_unit': 'ms',
-        'current': 'cloud_cover,wind_speed_10m,wind_direction_10m,precipitation,weather_code',
+        'current': 'cloud_cover,wind_speed_10m,wind_direction_10m,precipitation,weather_code,temperature_2m',
     })
     current = data.get('current') if isinstance(data, dict) else None
     code = int(number(current, 'weather_code', 0, 99))
     offset = number(data, 'utc_offset_seconds', -14 * 3600, 14 * 3600)
     rain = max(rain_from_code(code), number(current, 'precipitation', 0, 100) / 4)
-    return {
+    result = {
         'cover': number(current, 'cloud_cover', 0, 100) / 100,
         'wind': number(current, 'wind_speed_10m', 0, 45),
         # Meteorological direction is where wind comes from; clouds drift the opposite way.
@@ -94,6 +95,9 @@ def current_weather(latitude, longitude):
         'storm': 1.0 if code >= 95 else 0.0,
         'hour': (time.time() + offset) % 86400 / 3600,
     }
+    if 'temperature_2m' in current:
+        result['temperature_f']=number(current,'temperature_2m',-100,100)*1.8+32
+    return result
 
 
 class LiveWeather:
@@ -163,6 +167,8 @@ class LiveWeather:
             result, error, self.result, self.error = self.result, self.error, None, None
         if result:
             self.current = result
+            atmosphere.temperature_f = result.get('temperature_f')
+            atmosphere.temperature_reference_altitude = world.ground_height(*atmosphere.position)
             self.next_fetch = now + REFRESH_SECONDS
             atmosphere.hour = result['hour']
             atmosphere.day_length = 86400.0

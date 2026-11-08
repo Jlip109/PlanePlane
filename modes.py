@@ -67,7 +67,7 @@ class RingRun(Mode):
     SPACING = 760.0
     START_TIME = 30.0
     BONUS = 9.0
-    RING_TYPES = {'blue': (105.0,(65,155,255)), 'red': (45.0,(255,75,75))}
+    RING_TYPES = {'blue': (105.0,(65,155,255)), 'red': (45.0,(255,75,75)), 'fuel': (60.0,(65,235,145))}
     OFF_PATH_LIMIT = 5.0
 
     def __init__(self, game, seed=None):
