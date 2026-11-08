@@ -84,9 +84,9 @@ def test_server_scores_each_gate_once_and_safe_finish_bonus():
     expected=sum(200 if r['kind']=='red' else 100 for r in room.rings)
     assert p['score']==expected and p['next_gate']==len(room.rings)
     room.receive('a',state(z=FINISH_Z,y=RUNWAY_Y+3,speed=50))
-    assert p['score']==expected+LANDING_BONUS and p['landed']
+    assert p['score']==expected+LANDING_BONUS+1000 and p['landed']
     room.receive('a',state(z=FINISH_Z,y=RUNWAY_Y+3,speed=50))
-    assert p['score']==expected+LANDING_BONUS
+    assert p['score']==expected+LANDING_BONUS+1000
 
 
 def test_course_varies_altitude_spacing_and_is_deterministic():

@@ -14,6 +14,7 @@ from scores import Scores
 from plane import PLANE_MODELS
 from online_mode import OnlineRace
 from practice import OfflinePractice
+from flight_settings import ONLINE_FLIGHT_TUNING
 
 START = {'position': (0.0, -900.0), 'altitude': 700.0, 'heading': 0.0}
 MENU_STATES = ('title',)
@@ -32,6 +33,8 @@ class Game:
             if key in atmosphere.flight_tuning and isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value):
                 atmosphere.flight_tuning[key] = round(min(100,max(0,value)))
         saved_plane = self.scores.get('plane_model', 'classic')
+        self.online_locked=False
+        self.offline_tuning=dict(atmosphere.flight_tuning)
         atmosphere.plane_id = saved_plane if saved_plane in PLANE_MODELS else 'classic'
         self.hud = Hud(fonts)
         self.modes = {'free': FreeFlight(self), 'rings': RingRun(self, seed),'practice':OfflinePractice(self,seed)}
@@ -85,6 +88,7 @@ class Game:
         atmosphere.reset_view()
 
     def start(self, key):
+        self.set_online_tuning(key=='ffa')
         self.mode = self.modes[key]
         self.atmosphere.autopilot = False
         self.reset_flight()
@@ -93,6 +97,7 @@ class Game:
         self.sound('start')
 
     def to_title(self):
+        self.set_online_tuning(False)
         if self.mode and self.mode.key in ('ffa','practice'):
             self.atmosphere.left_match=True
             self.atmosphere.finish_rollout=False
@@ -127,6 +132,11 @@ class Game:
             self.cycle_aircraft()
 
     def handle_event(self, event):
+        if event.type==pygame.KEYDOWN and event.key==pygame.K_F6:
+            offline=self.network is None or getattr(self.network,'offline',False)
+            if offline and self.mode and self.mode.key in ('free','rings','practice') and self.state in ('flying','paused'):
+                self.atmosphere.fuel=100.0
+            return
         if self.mode and self.mode.key in ('ffa','practice') and self.state=='flying':
             self.mode.event(event)
         if event.type == pygame.KEYDOWN and event.key == pygame.K_F8:
@@ -162,6 +172,7 @@ class Game:
         self.scores.save()
 
     def set_tuning(self, key, value):
+        if self.online_locked:return
         if key == 'range':
             self.ring_range = round(min(100,max(0,value)))
             self.scores.data['ring_range'] = self.ring_range
@@ -172,6 +183,14 @@ class Game:
         self.atmosphere.flight_tuning[key] = round(min(100,max(0,value)))
         self.scores.data['flight_tuning'] = dict(self.atmosphere.flight_tuning)
         self.scores.save()
+
+    def set_online_tuning(self, enabled):
+        if enabled and not self.online_locked:
+            self.offline_tuning=dict(self.atmosphere.flight_tuning)
+        elif not enabled and self.online_locked:
+            self.atmosphere.flight_tuning.update(self.offline_tuning)
+        self.online_locked=enabled
+        if enabled:self.atmosphere.flight_tuning.update(ONLINE_FLIGHT_TUNING)
 
     def update(self, dt, sim_dt):
         atmosphere = self.atmosphere

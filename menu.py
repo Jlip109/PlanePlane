@@ -3,6 +3,8 @@
 import pygame
 
 import ui
+from race import AREA_RANGE
+from units import FEET_PER_METRE
 
 TITLE_ITEMS = [('free', 'Free Roam'), ('rings', 'Ring Mode'), ('practice','Practice Ring Mode'), ('aircraft', 'Aircraft'), ('quit', 'Quit')]
 VISIBLE_TITLE_ITEMS = TITLE_ITEMS
@@ -143,6 +145,10 @@ class Menu:
             self.hit_areas.append((index, pygame.Rect(x - 24, y - 6, 300, 40), 'title'))
             y += 44
         self.draw_title_card(surface, VISIBLE_TITLE_ITEMS[self.title_index][0])
+        medals=self.game.scores.get('podium_medals',{})
+        if any(medals.get(key,0) for key in ('gold','silver','bronze')):
+            ui.label(surface,'PODIUM MEDALS',fonts.tiny,(x,600),ui.ACCENT)
+            ui.text(surface,f"Gold {medals.get('gold',0)} · Silver {medals.get('silver',0)} · Bronze {medals.get('bronze',0)}",fonts.body,ui.TEXT,(x,628))
         ui.hint_row(surface, [('↑ ↓', 'Select'), ('ENTER', 'Start'), ('ESC', 'Quit')], fonts, (x, 690))
 
     def draw_title_card(self, surface, key):
@@ -175,23 +181,27 @@ class Menu:
                 pygame.draw.rect(surface, ui.ACCENT, (box.left + 20, y + 5, 4, 22), border_radius=2)
             self.hit_areas.append((index, pygame.Rect(box.left + 16, y - 6, 300, 40), 'pause'))
             y += 48
-        ui.label(surface,'Flight tuning',fonts.tiny,(640,145),ui.ACCENT)
+        locked=self.game.online_locked
+        ui.label(surface,'Online tuning · locked' if locked else 'Flight tuning',fonts.tiny,(640,145),ui.ACCENT)
         tuning = self.game.atmosphere.flight_tuning
         for index,(key,label) in enumerate((('climb','Climb · W/S + mouse'),('acceleration','Acceleration'),('steering','Steering · A/D + mouse'),('range','Ring path range'))):
             y = 185+index*83
             value = self.game.ring_range if key == 'range' else tuning[key]
             value_text = f'{250+4750*value/100:,.0f} ft' if key == 'range' else str(value)
+            if locked and key=='range':
+                value=100
+                value_text=f'{AREA_RANGE*FEET_PER_METRE:,.0f} ft'
             ui.text(surface,label,fonts.body,ui.TEXT,(640,y))
             ui.text(surface,value_text,fonts.mono,ui.ACCENT,(980,y),'topright')
             rect = pygame.Rect(640,y+32,340,8)
             pygame.draw.rect(surface,(55,68,80),rect,border_radius=4)
             x = rect.left+round(rect.width*value/100)
-            pygame.draw.rect(surface,ui.ACCENT,(rect.left,rect.top,max(1,x-rect.left),rect.height),border_radius=4)
-            pygame.draw.circle(surface,ui.TEXT,(x,rect.centery),9)
-            self.slider_areas.append((key,rect))
+            pygame.draw.rect(surface,ui.MUTED if locked else ui.ACCENT,(rect.left,rect.top,max(1,x-rect.left),rect.height),border_radius=4)
+            pygame.draw.circle(surface,ui.MUTED if locked else ui.TEXT,(x,rect.centery),9)
+            if not locked:self.slider_areas.append((key,rect))
         values = f"V{tuning['climb']}  A{tuning['acceleration']}  S{tuning['steering']}"
         ui.text(surface,values,fonts.mono,ui.ACCENT,(640,535))
-        ui.text(surface,'Range: 5 seconds outside ends Ring Mode.',fonts.small,ui.MUTED,(640,572))
+        ui.text(surface,'Online preset · Offline tuning stays adjustable.' if locked else 'Range: 5 seconds outside ends Ring Mode.',fonts.small,ui.MUTED,(640,572))
 
     def move_slider(self, key, x):
         rect = next(rect for name,rect in self.slider_areas if name == key)

@@ -1,9 +1,9 @@
 """Offline practice using the same race rules, with no sockets or weather requests."""
 import pygame
+import secrets
 
 from online_mode import OnlineRace
 from race import RaceRoom
-import ui
 
 
 class LocalSession:
@@ -44,6 +44,7 @@ class OfflinePractice(OnlineRace):
     def __init__(self,game,seed=None):
         super().__init__(game,seed)
         self.seed=seed
+        self.run_number=0
 
     def start(self,a):
         self.round_id=-1
@@ -52,7 +53,9 @@ class OfflinePractice(OnlineRace):
         env=dict(label='Offline Practice',hour=a.hour,local_time=f'{minutes//60:02d}:{minutes%60:02d}',
                  cover=a.cover,wind=a.wind,wind_angle=a.wind_angle,precipitation=a.precipitation,
                  storm=a.storm,live=False,offline=True)
-        self.game.network=LocalSession(self.seed,self.game.scores.get('username','Pilot'),env)
+        run_seed=secrets.randbits(31) if self.seed is None else self.seed+self.run_number
+        self.run_number+=1
+        self.game.network=LocalSession(run_seed,self.game.scores.get('username','Pilot'),env)
         super().start(a)
         self.sync(a)
 
@@ -63,8 +66,3 @@ class OfflinePractice(OnlineRace):
 
     def event(self,event):
         if event.type==pygame.MOUSEWHEEL:self.scroll=0
-
-    def draw_hud(self,surface,a,fonts):
-        super().draw_hud(surface,a,fonts)
-        if self.snapshot and self.snapshot['phase']=='results' and self.local['status']!='finished':
-            ui.text(surface,'Esc → Restart to practise again',fonts.body,ui.ACCENT,(640,580),'midtop')

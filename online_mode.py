@@ -8,6 +8,7 @@ import pygame
 import ui
 from modes import RingRun
 from race import START_Z,FINISH_Z,RUNWAY_Y
+from rewards import PODIUM
 
 
 class OnlineRace(RingRun):
@@ -52,6 +53,7 @@ class OnlineRace(RingRun):
         return tuple(np.concatenate([v[i] for v in pieces]).astype('f4') for i in range(3))
 
     def sync(self,atmosphere):
+        self.game.set_online_tuning(self.key=='ffa')
         network=self.game.network
         if not network:
             atmosphere.race_frozen=True
@@ -111,6 +113,7 @@ class OnlineRace(RingRun):
         self.time=data.get('elapsed',0) if phase=='racing' else 0
         if self.local and self.local['status']=='finished' and not data.get('practice',False) and self.last_record!=identity:
             self.game.scores.best('ffa_best_score',self.local['score'])
+            self.game.scores.claim_podium(identity,self.local.get('medal'))
             finish_time=self.local['finish_time']
             best=self.game.scores.get('ffa_best_time',0.0)
             if not best or finish_time<best:
@@ -179,6 +182,9 @@ class OnlineRace(RingRun):
             self.draw_browser(surface,fonts)
             return
         phase=data['phase']
+        if phase=='results':
+            self.draw_results(surface,fonts,data)
+            return
         if self.local and self.local['status']=='finished':
             self.draw_finished(surface,fonts,data)
             return
@@ -266,9 +272,45 @@ class OnlineRace(RingRun):
         ui.text(surface,f"{p['finish_time']:.2f} SECONDS",fonts.h1,ui.TEXT,(640,255),'midtop')
         label='PRACTICE · SCORES NOT RECORDED' if data.get('practice') else f"PLACE {p['place']} · {p['score']} POINTS"
         ui.text(surface,label,fonts.h2,ui.TEXT,(640,325),'midtop')
+        reward=PODIUM.get(p.get('place')) if p.get('medal') else None
+        if reward:
+            ui.text(surface,f"{reward['label'].upper()} MEDAL · +{p['podium_bonus']:,} PODIUM BONUS",fonts.body,reward['color'],(640,360),'midtop')
         if data['phase']=='racing':
             message=f"Other racers have {data.get('finish_cutoff',0):.1f}s to finish"
         else:message=f"Returning to lobby in {data['remaining']:.0f}s"
         if getattr(self.game.network,'offline',False):message='Esc → Restart to practise again'
         ui.text(surface,message,fonts.body,ui.MUTED,(640,395),'midtop')
         ui.text(surface,'E brakes · Runway contact is always safe',fonts.small,ui.MUTED,(640,480),'midtop')
+
+    def draw_results(self,surface,fonts,data):
+        """One screen for all 24 original participants, including DNF racers."""
+        ui.panel(surface,(120,76,1040,612),(9,18,27,245))
+        title='PRACTICE RESULTS' if data.get('practice') else 'RACE RESULTS'
+        if self.local and self.local['status']=='finished':title='FINISHED · '+title
+        ui.text(surface,title,fonts.h1,ui.ACCENT,(640,92),'midtop')
+        for label,x,anchor in (('#',145,'topleft'),('PILOT',205,'topleft'),('TIME',735,'topright'),('SCORE',900,'topright'),('RESULT / REWARD',1135,'topright')):
+            ui.label(surface,label,fonts.tiny,(x,149),ui.MUTED,anchor)
+        pilots=[p for p in data['players'] if p.get('participated',p['status']!='waiting')]
+        pilots.sort(key=lambda p:(p['status']!='finished',p.get('place') or 999,p.get('race_time') or 0))
+        for index,p in enumerate(pilots[:24]):
+            y=175+index*20
+            reward=PODIUM.get(p.get('place')) if p.get('medal') else None
+            color=reward['color'] if reward else ui.TEXT
+            if reward:
+                tint=tuple(15+int(channel*.12) for channel in color)
+                pygame.draw.rect(surface,(*tint,255),(135,y-1,1010,20),border_radius=3)
+            position=str(p['place']) if p.get('place') else '—'
+            elapsed=p.get('finish_time') if p['status']=='finished' else p.get('race_time')
+            time_text=f'{elapsed:.2f}s' if elapsed is not None else '—'
+            result='FINISHED'
+            if reward:result=f"{reward['label'].upper()} +{p['podium_bonus']:,}"
+            elif p['status']=='disqualified':result='DNF · '+p.get('reason','Disqualified')
+            elif p['status']!='finished':result=p['status'].upper()
+            ui.text(surface,position,fonts.mono_small,color,(145,y))
+            ui.text(surface,p['name'],fonts.mono_small,color,(205,y))
+            ui.text(surface,time_text,fonts.mono_small,ui.TEXT,(735,y),'topright')
+            ui.text(surface,f"{p['score']:,}",fonts.mono_small,ui.TEXT,(900,y),'topright')
+            ui.text(surface,result,fonts.tiny,color if reward else ui.MUTED,(1135,y),'topright')
+        ui.text(surface,'Scores include bonuses. DNF times show elapsed time before disqualification.',fonts.tiny,ui.MUTED,(145,667))
+        footer='Esc → Restart' if getattr(self.game.network,'offline',False) else f"Lobby in {data['remaining']:.0f}s"
+        ui.text(surface,footer,fonts.tiny,ui.ACCENT,(1135,667),'topright')

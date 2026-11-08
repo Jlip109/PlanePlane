@@ -5,6 +5,7 @@ import time
 import uuid
 
 import world
+from rewards import podium_reward
 
 RUNWAY_Y = 240.0
 START_Z = -4000.0
@@ -13,6 +14,7 @@ RACE_SECONDS = 120.0
 MAX_RACE_SECONDS = 600.0
 FINISH_GRACE_SECONDS = 30.0
 TARGET_COURSE_SPEED = 300.0
+MIN_RING_SPACING = 900.0
 COUNTDOWN_SECONDS = 5.0
 LANDING_BONUS = 500
 FUEL_RING_REFILL = 25.0
@@ -29,16 +31,17 @@ def spawn_for(slot):
 
 def course(seed):
     rng = random.Random(seed)
-    count = 40
+    count = 401
     mirror = rng.choice((-1,1))
-    phase = rng.uniform(-.25,.25)
+    phase = rng.uniform(-.4,.4)
+    frequency = rng.uniform(1.85,2.15)
     points=[]
     for index in range(count):
         t=index/(count-1)
         u=t+.018*math.sin(t*math.tau*3+phase)*math.sin(math.pi*t)
-        x=mirror*math.sin(u*math.tau*2)*math.sin(math.pi*u)
+        x=mirror*math.sin(u*math.tau*frequency)*math.sin(math.pi*u)
         z=START_Z+1100+u*(FINISH_Z-START_Z-1800)
-        y=300+4400*math.sin(math.pi*u)**2*(.78+.22*math.sin(u*math.tau+phase))
+        y=max(360,300+4400*math.sin(math.pi*u)**2*(.78+.22*math.sin(u*math.tau+phase)))
         points.append((x,y,z))
     def length(amplitude):
         p=[(0,RUNWAY_Y,START_Z-650)]+[(x*amplitude,y,z) for x,y,z in points]+[(0,RUNWAY_Y,FINISH_Z)]
@@ -46,12 +49,23 @@ def course(seed):
     low,high=0.0,8000.0
     for _ in range(32):
         middle=(low+high)/2
-        if length(middle)<RACE_SECONDS*TARGET_COURSE_SPEED:low=middle
+        if length(middle)<RACE_SECONDS*TARGET_COURSE_SPEED*1.02:low=middle
         else:high=middle
+    path=[(x*high,max(y,world.obstacle_height(x*high,z)+120),z) for x,y,z in points]
+    chosen=[path[0]]
+    gap=rng.uniform(1000,1400)
+    travelled=0.
+    for previous,point in zip(path,path[1:-1]):
+        travelled+=math.dist(previous,point)
+        if travelled>=gap and math.dist(chosen[-1],point)>=MIN_RING_SPACING:
+            chosen.append(point)
+            travelled=0.
+            gap=rng.uniform(1000,1400)
+    while len(chosen)>1 and math.dist(chosen[-1],path[-1])<MIN_RING_SPACING:
+        chosen.pop()
+    chosen.append(path[-1])
     rings=[]
-    for index,(x,y,z) in enumerate(points):
-        x*=high
-        y=max(y,world.obstacle_height(x,z)+120)
+    for index,(x,y,z) in enumerate(chosen):
         kind='red' if index%2 else 'blue'
         rings.append(dict(x=x,y=y,z=z,radius=105 if kind=='blue' else 45,kind=kind))
     for i,ring in enumerate(rings):
@@ -141,13 +155,17 @@ class RaceRoom:
     def join(self, player_id, name):
         self.members[player_id] = dict(id=player_id,name=name,ready=False,connected=True,
                                       score=0,next_gate=0,status='waiting',reason='',landed=False,previous=None,
-                                      fuel_credit=0,collected_fuel=[],finish_time=None,place=None,recorded=False)
+                                      fuel_credit=0,collected_fuel=[],finish_time=None,place=None,recorded=False,
+                                      race_time=None,medal=None,podium_bonus=0,participated=False)
 
     def leave(self, player_id):
         player = self.members.get(player_id)
         if not player:
             return
         player['connected'] = False
+        if self.phase in ('countdown','racing','results') and not player.get('participated',False):
+            self.members.pop(player_id,None)
+            return
         if self.phase in ('countdown','racing') and player['status']=='racing':
             self.disqualify(player,'Left the match')
         elif self.phase in ('lobby','loading'):
@@ -178,12 +196,14 @@ class RaceRoom:
         for index,p in enumerate(participants):
             p.update(status='racing',score=0,next_gate=0,reason='',landed=False,previous=None,
                      spawn=spawn_for(index),ready=False,fuel_credit=0,collected_fuel=[],
-                     finish_time=None,place=None,recorded=False)
+                     finish_time=None,place=None,recorded=False,race_time=None,
+                     medal=None,podium_bonus=0,participated=True)
         self.phase = 'countdown'
         self.deadline = self.clock()+COUNTDOWN_SECONDS
 
     def disqualify(self, player, reason):
-        player.update(status='disqualified',reason=reason)
+        elapsed=max(0,self.clock()-self.started_at) if self.started_at is not None else None
+        player.update(status='disqualified',reason=reason,race_time=elapsed)
 
     def receive(self, player_id, state):
         self.tick()
@@ -229,15 +249,20 @@ class RaceRoom:
                     p['fuel_credit']+=FUEL_RING_REFILL
 
     def finish_player(self, player):
+        if player['status']!='racing':return
         now=self.clock()
         place=1+sum(p['status']=='finished' for p in self.members.values())
+        reward=podium_reward(place,self.practice)
         player.update(landed=True,status='finished',finish_time=max(0,now-self.started_at),
-                      place=place,recorded=not self.practice)
+                      place=place,recorded=not self.practice,medal=reward['medal'],
+                      podium_bonus=reward['bonus'],race_time=max(0,now-self.started_at))
+        player['score']+=reward['bonus']
         if self.first_finish_at is None:
             self.first_finish_at=now
             self.deadline=now+FINISH_GRACE_SECONDS
         if not self.practice:
-            self.records.append(dict(name=player['name'],score=player['score'],time=player['finish_time'],round=self.round))
+            self.records.append(dict(name=player['name'],score=player['score'],time=player['finish_time'],round=self.round,
+                                     medal=player['medal'],podium_bonus=player['podium_bonus']))
             self.records=self.records[-240:]
 
     def complete(self):

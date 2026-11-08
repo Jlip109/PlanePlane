@@ -64,7 +64,7 @@ class RingRun(Mode):
     description = ('Follow the ring path: blue gates are larger, red gates are smaller. '
                    'Clear gates to add time. Stay within range of the route.')
     RADIUS = 70.0
-    SPACING = 900.0
+    SPACING = 1100.0
     START_TIME = 30.0
     BONUS = 9.0
     RING_TYPES = {'blue': (105.0,(65,155,255)), 'red': (45.0,(255,75,75)), 'fuel': (60.0,(65,235,145))}
@@ -122,8 +122,9 @@ class RingRun(Mode):
             self.route_climb = .75*self.route_climb + .25*self.rng.uniform(-60,60)
             heading += self.route_turn
             y += self.route_climb
-        x += math.sin(heading) * self.SPACING
-        z += math.cos(heading) * self.SPACING
+        spacing=self.SPACING*self.rng.uniform(.9,1.2)
+        x += math.sin(heading) * spacing
+        z += math.cos(heading) * spacing
         # Keep every gate above the highest terrain under its opening.
         reach = range(-112, 113, 28)
         clearance = max(world.obstacle_height(x + dx, z + dz) for dx in reach for dz in reach) + 105 + 40

@@ -54,13 +54,19 @@ def test_gate_is_an_extruded_decagon(atmosphere, fake_game, monkeypatch):
     gate.draw_ring(pygame.Surface((1280,720),pygame.SRCALPHA), atmosphere, ring, 0, (1280,720), 665)
     assert len(faces) == 40
     x,y,z,nx,nz = ring
-    angles, depths = set(), set()
+    angles, depths = [], set()
     for face in faces:
         for px,py,pz in face:
             side = (px-x)*nz - (pz-z)*nx
-            angles.add(round(math.atan2(py-y,side),5))
+            angles.append(math.atan2(py-y,side)%math.tau)
             depths.add(round((px-x)*nx+(pz-z)*nz,5))
-    assert len(angles) == 10 and depths == {-4,4}
+    # Inner/outer vertices share directions within float32 precision; rounding
+    # at a decimal boundary can otherwise split one corner into two groups.
+    directions=[]
+    for angle in sorted(angles):
+        if not directions or angle-directions[-1]>1e-5:directions.append(angle)
+    if len(directions)>1 and directions[0]+math.tau-directions[-1]<1e-5:directions.pop()
+    assert len(directions) == 10 and depths == {-4,4}
 
 
 def test_map_remains_visible_without_location_labels(atmosphere, fonts):

@@ -49,7 +49,7 @@ def test_route_has_gentle_continuous_changes(atmosphere, fake_game):
         after = run.rings[-1]
         assert before[3]*after[3]+before[4]*after[4] >= math.cos(.16)
         assert abs(after[1]-before[1]) <= 60
-        assert math.hypot(after[0]-before[0],after[2]-before[2]) == pytest.approx(run.SPACING)
+        assert run.SPACING*.9 <= math.hypot(after[0]-before[0],after[2]-before[2]) <= run.SPACING*1.2
         assert len(run.ring_types) == len(run.rings)
 
 

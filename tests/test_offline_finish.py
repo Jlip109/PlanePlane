@@ -32,9 +32,9 @@ def test_finish_contact_is_swept_and_flying_above_does_not_finish():
 
 def test_ring_spacing_is_moderately_increased():
     rings=course(123)
-    assert len(rings)==40 and RingRun.SPACING==900
+    assert 24<=len(rings)<=36 and RingRun.SPACING==1100
     distances=[np.linalg.norm(np.array([b[k]-a[k] for k in ('x','y','z')])) for a,b in zip(rings,rings[1:])]
-    assert np.mean(distances)>800
+    assert min(distances)>=900 and np.mean(distances)>1100
 
 
 def test_offline_practice_runs_finishes_and_restarts_without_network(atmosphere,fonts,tmp_path,monkeypatch):

@@ -39,6 +39,21 @@ class Scores:
             self.data[key] = items + [item]
             self.save()
 
+    def claim_podium(self,race_id,medal):
+        if medal not in ('gold','silver','bronze'):return False
+        claim=str(race_id)
+        claimed=self.get('podium_claims',[])
+        if claim in claimed:return False
+        saved=self.get('podium_medals',{})
+        totals={}
+        for key in ('gold','silver','bronze'):
+            value=saved.get(key,0)
+            totals[key]=max(0,value) if type(value) is int else 0
+        totals[medal]+=1
+        self.data.update(podium_medals=totals,podium_claims=(claimed+[claim])[-256:])
+        self.save()
+        return True
+
     def save(self):
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)

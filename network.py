@@ -9,12 +9,14 @@ import socket
 import threading
 import time
 import uuid
+import secrets
 
 from plane import PLANE_MODELS
 from units import MAX_FLIGHT_SPEED_MPS
 from race import RaceRoom, spawn_for
+from flight_settings import ONLINE_FLIGHT_TUNING
 
-VERSION = 2
+VERSION = 3
 TICK_RATE = 20
 MAX_LINE = 262144
 STATE_FIELDS = ('x','y','z','heading','bank','flight_pitch','speed','fuel')
@@ -97,7 +99,7 @@ class RoomServer:
         if sum(p.get('lobby')==lobby for p in self.peers.values())>=24:
             raise ValueError(f'Lobby {lobby} is full (24 racers)')
         self.leave_lobby(player_id)
-        if lobby not in self.rooms:self.rooms[lobby]=RaceRoom(self.seed+lobby*1000)
+        if lobby not in self.rooms:self.rooms[lobby]=RaceRoom(self.seed+lobby*1000+secrets.randbits(31))
         peer['lobby']=lobby
         room=self.rooms[lobby]
         room.join(player_id,peer['name'])
@@ -162,7 +164,8 @@ class RoomServer:
             room=self.rooms.get(self.peers[player_id]['lobby'])
             hour = (9+(time.monotonic()-self.started)*.1) % 24
             writer.write(encode({'type':'welcome','version':VERSION,'id':player_id,'seed':self.seed,'spawn':spawn,'hour':hour,
-                                 'race':room.snapshot() if room else None,'lobbies':self.directory(),'lobby_protocol':2}))
+                                 'race':room.snapshot() if room else None,'lobbies':self.directory(),'lobby_protocol':2,
+                                 'flight_tuning':ONLINE_FLIGHT_TUNING}))
             await writer.drain()
             while raw := await asyncio.wait_for(reader.readline(),30):
                 message = json.loads(raw)

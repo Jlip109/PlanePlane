@@ -1,6 +1,6 @@
 # Plane² — In the Clouds
 
-A Python flight game with two modes, a third-person aircraft, flat-coloured terrain, and a living sky.
+A Python flight game with online races, offline practice, a third-person aircraft, flat-coloured terrain, and a living sky.
 
 ## Run
 
@@ -29,6 +29,8 @@ connecting. **CREATE LOBBY** and **JOIN LOBBY** connect to `wss://planeplane.onr
 Offline Free Roam, endless Ring Mode, and Practice Ring Mode remain available.
 Framerate defaults to uncapped. **Offline Practice Rings** in the launcher starts a
 complete practice race without a lobby, network connection, or recorded scores.
+Each restart generates a new course. An explicit `--seed` produces a repeatable
+sequence of different practice layouts.
 It is also available from the title menu or directly:
 
 ```powershell
@@ -60,11 +62,14 @@ starting runway for a five-second countdown. Hold Space to accelerate, then W or
 left-mouse upward steering to take off. The username is reserved while connected;
 duplicate names are rejected, and disconnecting frees the name.
 
-Each route has 40 rings along about 22 miles of twists, turns and climbs above
+Each route has roughly 27–30 rings along about 22 miles of twists, turns and climbs above
 12,000 feet. It targets roughly two minutes at 670 mph, rather than imposing a fixed
 two-minute race cutoff. The route always descends toward the finish runway. Blue rings
-award 100 points, smaller red rings award 200. Rings are spaced about 20% farther apart
-than the previous 48-ring course. Passing a missed ring advances the target but earns
+award 100 points, smaller red rings award 200. Gaps are randomized with a minimum
+3D separation of 2,953 feet (900 metres); most gaps are around 0.6–0.9 miles.
+Turn shape, elevation profile and gaps vary by seed and round, while everyone in
+one lobby receives the same course. New lobbies also get fresh course seeds.
+Passing a missed ring advances the target but earns
 no points; missing rings cannot block the finish screen. Green fuel rings remain optional detours.
 
 Touching the finish runway immediately shows **FINISHED** with
@@ -73,6 +78,24 @@ the pilot's elapsed time. Finish order determines placing. The first finisher st
 If everyone finishes or is disqualified sooner, the results start immediately. There is
 a ten-minute no-finisher failsafe. Competitive finish times and scores update local best
 records; solo practice never writes them. Server session records last for the room lifetime.
+
+Competitive podium rewards are added to the race score:
+
+| Finish | Medal | Bonus points |
+| --- | --- | --- |
+| 1st | Gold | 1,000 |
+| 2nd | Silver | 600 |
+| 3rd | Bronze | 300 |
+
+Medal totals save locally and appear on the title screen. A race can award its medal
+only once per profile, even if the client receives repeated result updates. Solo
+practice, DNFs and fourth place onward do not receive podium rewards. Finish order
+still determines placing; bonus points do not reorder the race.
+
+When all racers have finished or the cutoff expires, the full results table shows
+every participant's placing, name, elapsed time, total score and medal/DNF result.
+All 24 racers fit on the screen. DNF times show elapsed time at disqualification,
+not a completed race time. Scores include ring points, landing and podium bonuses.
 
 A controlled landing adds 500 bonus points when speed is at most 123 mph and the wings
 and nose are nearly level. A faster runway arrival still finishes, without that bonus.
@@ -132,14 +155,15 @@ python main.py --mode ffa --connect ws://127.0.0.1:8080 --name PilotTwo --lobby-
 
 `--lobby-action create --lobby 2` creates Lobby 2 directly. `--lobby-action browse`
 opens the directory. The default command-line action joins or creates Lobby 1.
-Protocol version 2 requires updated clients and server; rebuild the `.exe` as well
+Protocol version 3 requires updated clients and server; rebuild the `.exe` as well
 as redeploying Render when moving from the previous single-lobby release.
 
 Choose **Free Roam** to explore or **Ring Mode** to fly through ten-sided 3D gates.
 Clear gates before the timer runs out to gain time and build a score multiplier.
 Blue gates have larger openings (105-metre radius); red gates are smaller
 (45-metre radius). They alternate along a route with gradual turns and elevation changes.
-The endless Ring Mode spacing is now 900 metres, up from 760 metres.
+Endless Ring Mode also randomizes gaps, between about 3,248 and 4,331 feet
+(990–1,320 metres), while retaining a smooth route.
 Use **Esc → Ring path range** to set the allowed distance from the 3D route,
 from 250 to 5,000 feet. The setting saves automatically. Leaving the route shows
 a five-second return countdown; returning resets it, while staying out ends the run.
@@ -177,7 +201,12 @@ All gameplay audio is disabled.
 Middle-mouse freecam takes priority over left-mouse steering when both are held.
 Releasing middle mouse restores the previous cockpit/chase view; R centres the camera.
 
-Press Esc to open the pause menu's three flight-tuning sliders: W/S climb response,
+Online races lock W/S response and A/D steering to **100**, and acceleration to **50**.
+The pause menu shows the locked values and server range; its sliders cannot change
+them. Frame caps remain adjustable. Offline preferences are preserved and restored
+when leaving online mode.
+
+Offline, press Esc to open the pause menu's three flight-tuning sliders: W/S climb response,
 acceleration, and A/D steering. Each runs from 0 to 100; higher values respond faster.
 Changes apply when you resume and save automatically. Defaults are **V60 A50 S50**;
 use the displayed V/A/S values when reporting how the controls feel.

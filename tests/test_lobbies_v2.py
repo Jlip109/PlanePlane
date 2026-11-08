@@ -176,6 +176,9 @@ def test_real_clients_can_browse_create_join_and_race_in_isolation(monkeypatch):
             assert not a.race['practice']
             server.rooms[1].deadline=server.rooms[1].clock()-.1
             await wait_until(lambda:a.race['phase']=='racing')
+            await wait_until(lambda:b.race['phase']=='racing')
+            assert a.race['rings']==b.race['rings']
+            assert a.welcome['flight_tuning']==dict(climb=100,acceleration=50,steering=100)
             assert c.race['phase']=='countdown'
             b.select_lobby('create',2)
             await wait_until(lambda:bool(b.lobby_error))
